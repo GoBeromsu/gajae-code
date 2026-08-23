@@ -768,10 +768,12 @@ export async function discoverSkills(
 export async function discoverContextFiles(
 	cwd?: string,
 	agentDir?: string,
+	settings?: Settings,
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	return await loadContextFilesInternal({
 		cwd: cwd ?? getProjectDir(),
 		agentDir,
+		settings,
 	});
 }
 
@@ -809,6 +811,7 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
 	agentDir?: string;
+	settings?: Settings;
 	appendPrompt?: string;
 	repeatToolDescriptions?: boolean;
 }
@@ -823,6 +826,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
 		agentDir: options.agentDir,
+		settings: options.settings,
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
