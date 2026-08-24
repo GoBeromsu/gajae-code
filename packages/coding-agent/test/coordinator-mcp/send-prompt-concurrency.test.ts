@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createCoordinatorMcpServer } from "../../src/coordinator-mcp/server";
-import { writeBrokerDiscovery } from "../../src/sdk/broker/discovery";
+import type { BrokerDiscovery } from "../../src/sdk/broker/discovery";
+import { brokerProcessIncarnation, writeBrokerDiscovery } from "../../src/sdk/broker/discovery";
 import type { SessionIndex } from "../../src/sdk/broker/session-index";
 import type { SessionRouterClient } from "../../src/sdk/router";
 import { prepareExactSessionAuthority } from "../helpers/sdk-exact-session-authority";
@@ -31,19 +32,21 @@ describe("send_prompt same-session concurrency", () => {
 			const sessionUrl = "ws://127.0.0.1:4313";
 			const agentDir = path.join(root, "agent-global");
 			const brokerSessions: Array<Record<string, unknown>> = [];
-			await writeBrokerDiscovery(agentDir, {
+			const brokerDiscovery = {
 				version: 1,
 				protocolVersion: 3,
 				packageGeneration: "test",
 				ownerId: "test-owner",
 				pid: process.pid,
+				incarnation: brokerProcessIncarnation(process.pid) ?? "test-incarnation",
 				host: "127.0.0.1",
 				port: 4312,
 				url: brokerUrl,
 				token: "broker-token",
 				startedAt: Date.now(),
 				heartbeatAt: Date.now(),
-			});
+			} satisfies BrokerDiscovery;
+			await writeBrokerDiscovery(agentDir, brokerDiscovery);
 			const authority = await prepareExactSessionAuthority({
 				agentDir,
 				cwd: root,
@@ -62,6 +65,8 @@ describe("send_prompt same-session concurrency", () => {
 				},
 				services: {
 					getAgentDir: () => agentDir,
+					ensureBroker: async () => brokerDiscovery,
+					readSdkBrokerDiscovery: async () => brokerDiscovery,
 					connectBroker: async () =>
 						({
 							global: async (operation: string, input: Record<string, unknown>) => {
