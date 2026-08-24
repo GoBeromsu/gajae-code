@@ -1388,7 +1388,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		SLOW_SDK_TEST_TIMEOUT_MS,
 	);
 
-	it("restores fallback MCP, thinking, and service-tier state in memory without rewriting the session file", async () => {
+	it("restores fallback MCP and service-tier state without selecting thinking in memory or rewriting the session file", async () => {
 		const sessionManager = SessionManager.create(tempDir, tempDir);
 		sessionManager.appendMessage({
 			role: "user",
@@ -1428,7 +1428,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			],
 		});
 		try {
-			expect(session.thinkingLevel).toBe(ThinkingLevel.High);
+			expect(session.thinkingLevel).toBeUndefined();
 			expect(session.serviceTier).toBe("priority");
 			expect(session.getSelectedMCPToolNames()).toEqual(["mcp__github_create_issue"]);
 			expect(session.getActiveToolNames()).toEqual(
