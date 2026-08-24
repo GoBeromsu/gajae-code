@@ -11733,6 +11733,7 @@ mod secure_skill_write_tests {
 			root.to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"first".to_owned(),
+			None,
 		);
 		assert!(first.ok, "{:?}", first.code);
 		let path = root.join("managed").join("SKILL.md");
@@ -11742,6 +11743,7 @@ mod secure_skill_write_tests {
 			root.to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"second".to_owned(),
+			None,
 		);
 		assert!(second.ok, "{:?}", second.code);
 		assert_eq!(fs::read_to_string(&path).expect("read overwrite"), "second");
@@ -11768,6 +11770,7 @@ mod secure_skill_write_tests {
 			gjc.join("skills").to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"blocked".to_owned(),
+			None,
 		);
 		assert_rejected_link(gjc_result.code.as_deref());
 
@@ -11779,6 +11782,7 @@ mod secure_skill_write_tests {
 			root.to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"blocked".to_owned(),
+			None,
 		);
 		assert_rejected_link(root_result.code.as_deref());
 
@@ -11790,6 +11794,7 @@ mod secure_skill_write_tests {
 			root.to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"blocked".to_owned(),
+			None,
 		);
 		assert_rejected_link(skill_result.code.as_deref());
 
@@ -11803,6 +11808,7 @@ mod secure_skill_write_tests {
 			root.to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"blocked".to_owned(),
+			None,
 		);
 		assert_rejected_link(file_result.code.as_deref());
 		assert_eq!(fs::read_to_string(&outside_file).expect("read outside file"), "outside");
@@ -11813,6 +11819,7 @@ mod secure_skill_write_tests {
 			root.to_string_lossy().into_owned(),
 			"managed".to_owned(),
 			"blocked".to_owned(),
+			None,
 		);
 		assert_eq!(hard_link_result.code.as_deref(), Some("hard_link"));
 		assert_eq!(
@@ -11844,6 +11851,7 @@ mod secure_skill_write_tests {
 				root_for_write.to_string_lossy().into_owned(),
 				"managed".to_owned(),
 				"after".to_owned(),
+				None,
 			)
 		});
 		entered_rx.recv().expect("wait for private-file write");
@@ -11876,6 +11884,7 @@ mod secure_skill_write_tests {
 				root_for_write.to_string_lossy().into_owned(),
 				"managed".to_owned(),
 				"secret-stage".to_owned(),
+				None,
 			)
 		});
 		entered_rx.recv().expect("wait for private-file write");
@@ -11921,6 +11930,7 @@ mod secure_skill_write_tests {
 						root.to_string_lossy().into_owned(),
 						"managed".to_owned(),
 						content,
+						None,
 					)
 				})
 			})
