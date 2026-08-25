@@ -7098,6 +7098,15 @@ describe("ModelRegistry", () => {
 				"X-Monkey-Id",
 				"X-Vendor-Nonce",
 			];
+			let requests = 0;
+			using _hook = hookFetch(() => {
+				requests++;
+				return new Response(JSON.stringify({ data: [{ id: `secret-model-${requests}` }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			});
+			let registry: ModelRegistry | undefined;
 			for (const headerName of secretHeaders) {
 				const config = (value: string) => ({
 					"discovery-provider": {
@@ -7109,16 +7118,7 @@ describe("ModelRegistry", () => {
 				});
 				writeRawModelsJson(config("pin-0001"));
 				authStorage.setRuntimeApiKey("discovery-provider", "credential-a");
-				let requests = 0;
-				using _hook = hookFetch(() => {
-					requests++;
-					return new Response(JSON.stringify({ data: [{ id: `secret-model-${requests}` }] }), {
-						status: 200,
-						headers: { "Content-Type": "application/json" },
-					});
-				});
-
-				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				if (registry === undefined) registry = new ModelRegistry(authStorage, modelsJsonPath);
 				await registry.refreshProvider("discovery-provider", "online-if-uncached");
 				const row = readModelCache("discovery-provider", 24 * 60 * 60 * 1000, Date.now, cacheDbPath);
 				const authEvidence = authStorage.getProviderEvidenceGeneration("discovery-provider", "credential-a");
@@ -7150,14 +7150,12 @@ describe("ModelRegistry", () => {
 				expect(requests).toBe(requestsAfterFirstFetch);
 				expect(offlineRegistry.find("discovery-provider", "secret-model-1")).toBeUndefined();
 
-				const sameSecretRegistry = new ModelRegistry(authStorage, modelsJsonPath);
-				await sameSecretRegistry.refreshProvider("discovery-provider", "online-if-uncached");
+				await offlineRegistry.refreshProvider("discovery-provider", "online-if-uncached");
 				expect(requests).toBeGreaterThan(requestsAfterFirstFetch);
 
 				writeRawModelsJson(config("pin-0002"));
-				const changedSecretRegistry = new ModelRegistry(authStorage, modelsJsonPath);
 				const requestsBeforeChange = requests;
-				await changedSecretRegistry.refreshProvider("discovery-provider", "online-if-uncached");
+				await offlineRegistry.refreshProvider("discovery-provider", "online-if-uncached");
 				expect(requests).toBeGreaterThan(requestsBeforeChange);
 			}
 		}, 60_000);
