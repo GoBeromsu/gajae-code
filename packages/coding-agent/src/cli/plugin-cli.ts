@@ -4,7 +4,7 @@
  * Handles `gjc plugin <command>` subcommands for plugin lifecycle management.
  */
 
-import { APP_NAME, getProjectDir } from "@gajae-code/utils";
+import { APP_NAME, getAgentDir, getProjectDir } from "@gajae-code/utils";
 import chalk from "chalk";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import {
@@ -893,8 +893,8 @@ async function handleDoctor(
 	const checks = await manager.doctor({ fix: flags.fix });
 	try {
 		const statuses = flags.migratePlugins
-			? await runGjcPluginMigrationPreflight(getProjectDir())
-			: await getGjcPluginMigrationStatuses(getProjectDir(), { migrate: false });
+			? await runGjcPluginMigrationPreflight(getProjectDir(), getAgentDir())
+			: await getGjcPluginMigrationStatuses(getProjectDir(), { migrate: false, agentDir: getAgentDir() });
 		for (const status of statuses) {
 			checks.push({
 				name: `gjc-plugin:${status.scope}:${status.plugin}:migration`,
