@@ -1,5 +1,3 @@
-import * as nodeFs from "node:fs";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	Agent,
@@ -36,7 +34,6 @@ import {
 	postmortem,
 	prompt,
 	Snowflake,
-	setProjectDir,
 } from "@gajae-code/utils";
 import {
 	createAppendOnlyContextManager,
@@ -50,7 +47,7 @@ import {
 	isBackgroundJobSupportEnabled,
 	jobElapsedMs,
 } from "../async";
-import { loadCapability, reset as resetCapabilities } from "../capability";
+import { loadCapability } from "../capability";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
 import type { SourceMeta } from "../capability/types";
 import { AUTOROUTING_INACTIVE_WARNING } from "../config/autorouting-contract";
@@ -79,7 +76,6 @@ import { resolveConfigValue } from "../config/resolve-config-value";
 import { getEmbeddedDefaultGjcSkills } from "../defaults/gjc-defaults";
 import { BUNDLED_GROK_BUILD_EXTENSION_ID, getBundledGrokBuildExtensionFactory } from "../defaults/gjc-grok-cli";
 import { initializeWithSettings, releaseSettingsScope } from "../discovery";
-import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../discovery/helpers";
 import { TtsrManager } from "../export/ttsr";
 import type { CustomCommandsLoadResult, LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "../extensibility/custom-tools/types";
@@ -120,7 +116,6 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { normalizePluginHook } from "../hooks/normalize";
 import { initializeLocalRoot, LocalProtocolHandler, type LocalProtocolOptions } from "../internal-urls";
 import type { LspStartupServerInfo } from "../lsp";
-import { shutdownAll as shutdownAllLspClients } from "../lsp/client";
 import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -145,7 +140,7 @@ import { markAutoroutingInactive } from "../sdk/host/internal-autorouting-state"
 import { createSdkSessionRuntimeExtension, registerSdkOnlyNotificationCommand } from "../sdk/host/session-runtime";
 import { createSdkWebSocketTransport } from "../sdk/host/websocket-transport";
 import type { SecretObfuscator } from "../secrets";
-import { AgentSession, type ForkContextSeed } from "../session/agent-session";
+import { AgentSession, type AgentSessionRescopeParticipant, type ForkContextSeed } from "../session/agent-session";
 import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "../session/auth-storage";
 import { type CustomMessage, convertToLlm } from "../session/messages";
 import { createReadonlySessionManager, SessionManager } from "../session/session-manager";
@@ -2329,6 +2324,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		};
 
+		const canAgentRescopeSessionCwd =
+			!isCanonicalSubSession &&
+			!options.bashRestrictionProfile &&
+			(options.bashAllowedPrefixes ?? []).length === 0 &&
+			!options.mcpManager &&
+			explicitMcpConfigPath === undefined &&
+			options.workspaceTree === undefined;
+		const rescopeSessionCwdParticipant: AgentSessionRescopeParticipant | undefined = canAgentRescopeSessionCwd
+			? {
+					assertCanRescope: () => {
+						if (options.mcpManager && !ownsMcpManager) {
+							throw new Error(
+								"Cannot rescope a session with caller-owned MCP authority; recreate the session at the target cwd.",
+							);
+						}
+					},
+					rebindCwdCapturingAuthority,
+					applyRescopedReadState,
+				}
+			: undefined;
+
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -2360,229 +2376,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			requireYieldTool: options.requireYieldTool,
 			taskDepth: options.taskDepth ?? 0,
 			currentAgentType: options.currentAgentType,
-			// Agent-invokable session rescope (#4629). Provided only where
-			// relocation is safe: canonical top-level sessions (the same
-			// isCanonicalSubSession predicate that gates SDK hosting — taskDepth 0,
-			// no parentTaskPrefix, no currentAgentType) without a restricted bash
-			// surface. Runs the same sequence as the text/ACP `/move` handler so
-			// tool path resolution, the bash default cwd, and plugin caches follow
-			// the move. Unlike the user-driven `/move`, the model-invoked accessor
-			// is bound to at most one successful move per session, rejects
-			// re-entrant calls, refuses to move while a workflow skill is active
-			// (its cwd-local state and guards stay pinned to the launch root), and
-			// only narrows: the canonical target must be a strict descendant of
-			// the canonical current cwd, so an injected or speculative call cannot
-			// widen the session's tool/write scope to a parent, a sibling project,
-			// or an arbitrary absolute path.
-			...(!isCanonicalSubSession &&
-			!options.bashRestrictionProfile &&
-			(options.bashAllowedPrefixes ?? []).length === 0 &&
-			!options.mcpManager &&
-			explicitMcpConfigPath === undefined &&
-			options.workspaceTree === undefined
+			...(canAgentRescopeSessionCwd
 				? {
-						rescopeSessionCwd: (() => {
-							let moveConsumed = false;
-							return async (target: string): Promise<{ from: string; to: string }> => {
-								if (moveConsumed) {
-									throw new Error(
-										"This session has already been rescoped; only one agent-invoked move is allowed per session.",
-									);
-								}
-								if (session?.getEffectiveActiveWorkflowSkillState()) {
-									throw new Error(
-										"A workflow skill is active in this session; finish or exit it before rescoping.",
-									);
-								}
-								if (options.mcpManager && !ownsMcpManager) {
-									throw new Error(
-										"Cannot rescope a session with caller-owned MCP authority; recreate the session at the target cwd.",
-									);
-								}
-								return sessionManager.runExclusiveCwdTransition(async () => {
-									if (moveConsumed) {
-										throw new Error(
-											"This session has already been rescoped; only one agent-invoked move is allowed per session.",
-										);
-									}
-									if (session?.getEffectiveActiveWorkflowSkillState()) {
-										throw new Error(
-											"A workflow skill became active while waiting for the cwd transition; finish or exit it before rescoping.",
-										);
-									}
-									const from = sessionManager.getCwd();
-									const resolvedPath = path.resolve(from, target);
-									let canonicalFrom: string;
-									let canonicalTarget: string;
-									try {
-										canonicalFrom = await fs.realpath(from);
-										canonicalTarget = await fs.realpath(resolvedPath);
-									} catch {
-										throw new Error(`Directory does not exist or is not a directory: ${resolvedPath}`);
-									}
-									if (!(await fs.stat(canonicalTarget)).isDirectory()) {
-										throw new Error(`Directory does not exist or is not a directory: ${resolvedPath}`);
-									}
-									const relative = path.relative(canonicalFrom, canonicalTarget);
-									if (relative === "") {
-										throw new Error(
-											`Target ${canonicalTarget} is the current session directory; nothing to move.`,
-										);
-									}
-									if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-										throw new Error(
-											`Refusing to rescope outside the current session directory: ${canonicalTarget} is not within ${canonicalFrom}. move_session only narrows the session scope; ask the user to restart or /move for a broader relocation.`,
-										);
-									}
-									let targetHandle: nodeFs.promises.FileHandle | undefined;
-									let expectedIdentity: { dev: bigint; ino: bigint };
-									try {
-										targetHandle = await SessionManager.openNoFollowDirectory(canonicalTarget);
-										const opened = await targetHandle.stat({ bigint: true });
-										if (!opened.isDirectory()) {
-											throw new Error(`Directory does not exist or is not a directory: ${resolvedPath}`);
-										}
-										expectedIdentity = { dev: opened.dev, ino: opened.ino };
-										await fs.access(canonicalTarget, nodeFs.constants.R_OK | nodeFs.constants.X_OK);
-									} catch (error) {
-										await targetHandle?.close().catch(() => {});
-										if (error instanceof Error && error.message.startsWith("Directory does not exist")) {
-											throw error;
-										}
-										throw new Error(
-											`Directory identity or access unavailable: ${canonicalTarget}${
-												error instanceof Error ? ` (${error.message})` : ""
-											}`,
-										);
-									}
-									// Process-cwd authority is an explicit claim, never inferred from
-									// `process.cwd() === from`: sibling sessions launched at the same
-									// root both satisfy that, so acting on it would chdir the process
-									// and clear process-global caches underneath the sibling.
-									const ownsProcessCwd = SessionManager.isProcessCwdOwner(sessionManager);
-									const restoreLaunchRoot = async (failure: unknown): Promise<never> => {
-										const restoreErrors: Error[] = [];
-										if (ownsProcessCwd) {
-											try {
-												setProjectDir(canonicalFrom);
-												if (path.resolve(process.cwd()) !== path.resolve(canonicalFrom)) {
-													throw new Error("Process cwd did not restore to the launch root.");
-												}
-											} catch (error) {
-												restoreErrors.push(error instanceof Error ? error : new Error(String(error)));
-											}
-											try {
-												resetCapabilities();
-												const restoreRegistry = await resolveActiveProjectRegistryPath(canonicalFrom).catch(
-													() => undefined,
-												);
-												clearPluginRootsAndCaches(restoreRegistry ? [restoreRegistry] : undefined);
-											} catch (error) {
-												restoreErrors.push(error instanceof Error ? error : new Error(String(error)));
-											}
-										}
-										try {
-											await rebindCwdCapturingAuthority(canonicalFrom);
-										} catch (error) {
-											restoreErrors.push(error instanceof Error ? error : new Error(String(error)));
-										}
-										if (restoreErrors.length > 0) {
-											throw new AggregateError(
-												restoreErrors,
-												"Failed to restore launch-root rescope authority.",
-												{
-													cause: failure,
-												},
-											);
-										}
-										throw failure;
-									};
-									try {
-										// Every fallible step that the moved session depends on runs
-										// BEFORE the session-file commit, so a failure here leaves the
-										// session exactly where it was and the tool call is a clean
-										// rejection rather than a half-moved session.
-										if (ownsProcessCwd) {
-											setProjectDir(canonicalTarget);
-											try {
-												// `setProjectDir` chdirs a NAME. Confirm the process actually
-												// landed on the pinned directory, so a path replaced after
-												// the name checks cannot escape the validated descendant.
-												await SessionManager.assertProcessCwdIdentity(expectedIdentity);
-											} catch (error) {
-												setProjectDir(canonicalFrom);
-												throw error;
-											}
-										}
-										let rescopeFailure: unknown;
-										try {
-											if (ownsProcessCwd) {
-												resetCapabilities();
-												const projectRegistry = await resolveActiveProjectRegistryPath(canonicalTarget);
-												clearPluginRootsAndCaches(projectRegistry ? [projectRegistry] : undefined);
-											}
-											// Plugin/MCP/Python authority must be rebound successfully
-											// before committing; swallowing a failure here is what leaves
-											// a moved session holding launch-root tool authority.
-											await rebindCwdCapturingAuthority(canonicalTarget);
-										} catch (error) {
-											rescopeFailure = error;
-										}
-										if (rescopeFailure !== undefined) {
-											await restoreLaunchRoot(rescopeFailure);
-										}
-										try {
-											await sessionManager.flush();
-											// Commit last: `moveTo` re-validates the pinned identity through
-											// the still-open handle at the state-changing boundary.
-											await sessionManager.moveTo(canonicalTarget, {
-												expectedIdentity,
-												targetHandle,
-											});
-										} catch (error) {
-											const committedCwd = sessionManager.getCwd();
-											const stayedAtLaunchRoot = path.resolve(committedCwd) === path.resolve(from);
-											if (stayedAtLaunchRoot) await restoreLaunchRoot(error);
-											// SessionManager can publish the durable move before a later metadata
-											// write fails. Treat that state as committed rather than reporting a
-											// rejection after the session has moved.
-											moveConsumed = true;
-											logger.warn("Session rescope committed before finalization failed", {
-												error: safeErrorForLog(error),
-												cwd: committedCwd,
-											});
-										}
-										moveConsumed = true;
-										if (ownsProcessCwd) {
-											try {
-												await shutdownAllLspClients();
-											} catch (error) {
-												logger.warn("Failed to reset launch-root LSP clients after session rescope", {
-													error: safeErrorForLog(error),
-												});
-											}
-										}
-										// Cwd-derived read-only state the prompt and subagents consume.
-										// Best-effort by design: the move is committed, and a failed
-										// re-discovery must not present a committed move as a failure.
-										await applyRescopedReadState(sessionManager.getCwd());
-										try {
-											await session?.refreshSshTool({ activateIfAvailable: true });
-										} catch (error) {
-											// Non-fatal: the session has moved; the SSH tool refreshes
-											// on its next activation attempt.
-											logger.warn("Committed session rescope could not refresh the SSH tool", {
-												error: safeErrorForLog(error),
-												cwd: sessionManager.getCwd(),
-											});
-										}
-										return { from, to: sessionManager.getCwd() };
-									} finally {
-										await targetHandle.close().catch(() => {});
-									}
-								});
-							};
-						})(),
+						rescopeSessionCwd: (target: string): Promise<{ from: string; to: string }> => {
+							if (!session) return Promise.reject(new Error("Session is not initialized."));
+							return session.rescopeSessionCwd(target);
+						},
 					}
 				: {}),
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
@@ -4339,6 +4138,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				await session?.refreshBaseSystemPrompt();
 			},
 			reloadSshTool,
+			rescopeSessionCwdParticipant,
 			requestedToolNames: requestedToolNameSet,
 			explicitEmptyToolSelection: hasExplicitEmptyToolSelection,
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
