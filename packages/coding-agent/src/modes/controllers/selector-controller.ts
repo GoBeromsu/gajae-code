@@ -11,7 +11,7 @@ import { getOAuthProviders } from "@gajae-code/ai/utils/oauth";
 import type { OAuthProvider } from "@gajae-code/ai/utils/oauth/types";
 import type { Component, OverlayHandle, SlashCommand } from "@gajae-code/tui";
 import { Input, Loader, resolvePetMode, Spacer, Text } from "@gajae-code/tui";
-import { getAgentDbPath, getProjectDir, logger, VERSION } from "@gajae-code/utils";
+import { getAgentDbPath, logger, VERSION } from "@gajae-code/utils";
 import {
 	type AutoroutingProvenance,
 	type AutoroutingSetup,
@@ -1841,7 +1841,7 @@ export class SelectorController {
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
 						availableModelProfiles: [...this.ctx.session.modelRegistry.getModelProfiles().keys()],
-						cwd: getProjectDir(),
+						cwd: this.ctx.sessionManager.getCwd(),
 						agentDir: this.ctx.session.getSessionAgentDir(),
 						gjcRuntimeSnapshot: this.ctx.session.gjcRuntimeSnapshot,
 						gjcActivationGeneration: this.ctx.session.gjcActivationGeneration,
@@ -2091,7 +2091,11 @@ export class SelectorController {
 	 * Replaces /status with a unified view of all providers and extensions.
 	 */
 	async showExtensionsDashboard(): Promise<void> {
-		const dashboard = await ExtensionDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows);
+		const dashboard = await ExtensionDashboard.create(
+			this.ctx.sessionManager.getCwd(),
+			this.ctx.settings,
+			this.ctx.ui.terminal.rows,
+		);
 		this.showSelector(done => {
 			dashboard.onClose = () => {
 				done();
@@ -2112,7 +2116,7 @@ export class SelectorController {
 	async showCustomizationDashboard(): Promise<void> {
 		let dashboard: CustomizationDashboard;
 		try {
-			dashboard = await CustomizationDashboard.create(getProjectDir(), this.ctx.settings);
+			dashboard = await CustomizationDashboard.create(this.ctx.sessionManager.getCwd(), this.ctx.settings);
 		} catch (error) {
 			this.ctx.showError(`Failed to open /extensions: ${error instanceof Error ? error.message : String(error)}`);
 			return;
@@ -2895,7 +2899,8 @@ export class SelectorController {
 		const mgr = new MarketplaceManager({
 			marketplacesRegistryPath: getMarketplacesRegistryPath(),
 			installedRegistryPath: getInstalledPluginsRegistryPath(),
-			projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
+			projectInstalledRegistryPath:
+				(await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd())) ?? undefined,
 			marketplacesCacheDir: getMarketplacesCacheDir(),
 			pluginsCacheDir: getPluginsCacheDir(),
 			clearPluginRootsCache: clearPluginRootsAndCaches,
