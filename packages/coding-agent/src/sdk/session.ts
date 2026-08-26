@@ -2192,24 +2192,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const previousCwdCapturing = [...cwdCapturingToolNames];
 			const nextCwdCapturing: string[] = [];
 			const nextCustomTools: CustomTool[] = [];
-			try {
-				const declarations = await getGjcPluginToolDeclarations(to, agentDir);
-				const pluginToolResult = await loadAlwaysOnPluginTools({
-					cwd: to,
-					agentDir,
-					reservedToolNames: session.getAllToolNames().filter(name => !previousCwdCapturing.includes(name)),
-					declarations,
-				});
-				nextCustomTools.push(...pluginToolResult.tools);
-				nextCwdCapturing.push(...pluginToolResult.tools.map(tool => tool.name));
-			} catch (error) {
-				logger.warn("Failed to reload always-on plugin tools after session rescope", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
+			const declarations = await getGjcPluginToolDeclarations(to, agentDir);
+			const pluginToolResult = await loadAlwaysOnPluginTools({
+				cwd: to,
+				agentDir,
+				reservedToolNames: session.getAllToolNames().filter(name => !previousCwdCapturing.includes(name)),
+				declarations,
+			});
+			nextCustomTools.push(...pluginToolResult.tools);
+			nextCwdCapturing.push(...pluginToolResult.tools.map(tool => tool.name));
 			if (!options.mcpManager && explicitMcpConfigPath === undefined) {
 				const previousManager = mcpManager;
-				if (previousManager) await previousManager.disconnectAll().catch(() => {});
 				pluginMcpToolNames.length = 0;
 				conventionalMcpToolNames.length = 0;
 				let nextManager: MCPManager | undefined;
@@ -2254,10 +2247,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						}
 					}
 				} catch (error) {
-					logger.warn("Failed to recreate MCP authority after session rescope", {
-						error: error instanceof Error ? error.message : String(error),
-					});
+					await nextManager?.disconnectAll().catch(() => {});
+					throw error;
 				}
+				if (previousManager && previousManager !== nextManager)
+					await previousManager.disconnectAll().catch(() => {});
 				mcpManager = nextManager;
 				ownsMcpManager = Boolean(nextManager);
 				await session.replaceOwnedMcpManager(nextManager);
@@ -2282,6 +2276,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const rediscovered = await loadContextFilesResultInternal({ cwd: to, agentDir, settings });
 				contextFiles = rediscovered.contextFiles;
 			} catch (error) {
+				contextFiles = [];
 				logger.warn("Failed to re-discover context files after session rescope", {
 					error: safeErrorForLog(error),
 				});
@@ -2299,6 +2294,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					if (!options.parentTaskPrefix) setActiveSkills(skills);
 					await session?.replaceSkills(skills);
 				} catch (error) {
+					skills = [];
+					if (!options.parentTaskPrefix) setActiveSkills([]);
+					await session?.replaceSkills([]);
 					logger.warn("Failed to reload skills after session rescope", { error: safeErrorForLog(error) });
 				}
 			}
