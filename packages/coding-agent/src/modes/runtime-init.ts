@@ -436,6 +436,8 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					}
 					case "session.cwd.move":
 						await session.sessionManager.moveTo(String(input.path));
+						await session.replaceOwnedMcpManager?.(undefined);
+						await session.refreshMCPTools?.([]);
 						await session.refreshSshTool({ activateIfAvailable: true });
 						return { moved: true, cwd: session.sessionManager.getCwd() };
 					default:
