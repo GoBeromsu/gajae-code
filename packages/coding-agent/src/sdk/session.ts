@@ -2247,14 +2247,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						}
 					}
 				} catch (error) {
-					await nextManager?.disconnectAll().catch(() => {});
+					let cleanupError: unknown;
+					try {
+						await nextManager?.disconnectAll();
+					} catch (disconnectError) {
+						cleanupError = disconnectError;
+					}
+					if (cleanupError !== undefined) throw attachMcpCleanupDiagnostic(error, cleanupError);
 					throw error;
 				}
 				if (previousManager && previousManager !== nextManager) {
 					try {
 						await previousManager.disconnectAll();
 					} catch (error) {
-						await nextManager?.disconnectAll().catch(() => {});
+						let cleanupError: unknown;
+						try {
+							await nextManager?.disconnectAll();
+						} catch (disconnectError) {
+							cleanupError = disconnectError;
+						}
+						if (cleanupError !== undefined) throw attachMcpCleanupDiagnostic(error, cleanupError);
 						throw error;
 					}
 				}
