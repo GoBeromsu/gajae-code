@@ -2250,8 +2250,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await nextManager?.disconnectAll().catch(() => {});
 					throw error;
 				}
-				if (previousManager && previousManager !== nextManager)
-					await previousManager.disconnectAll().catch(() => {});
+				if (previousManager && previousManager !== nextManager) await previousManager.disconnectAll();
 				mcpManager = nextManager;
 				ownsMcpManager = Boolean(nextManager);
 				await session.replaceOwnedMcpManager(nextManager);
