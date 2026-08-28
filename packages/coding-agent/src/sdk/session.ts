@@ -2162,13 +2162,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let ownedPluginServersConnected = false;
 		const notificationDebounceTimers = new Map<string, Timer>();
 		const stagedMcpCleanup = new Map<MCPManager, () => void>();
-		const wireMcpManagerCallbacks = (manager: MCPManager): void => {
+		const wireMcpManagerCallbacks = (manager: MCPManager, isCurrent: () => boolean = () => true): void => {
 			manager.setOnPromptsChanged(serverName => {
+				if (!isCurrent()) return;
 				const promptCommands = buildMCPPromptCommands(manager);
 				session.setMCPPromptCommands(promptCommands);
 				logger.debug("MCP prompt commands refreshed", { path: `mcp:${serverName}` });
 			});
 			manager.setOnResourcesChanged((serverName, uri) => {
+				if (!isCurrent()) return;
 				logger.debug("MCP resources changed", { path: `mcp:${serverName}`, uri });
 				if (!settings.get("mcp.notifications")) return;
 				const debounceMs = settings.get("mcp.notificationDebounceMs");
@@ -2246,7 +2248,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							session.registerToolSessionCleanup(() => nextManager?.disconnectAll()),
 						);
 						nextManager.setAuthStorage(authStorage);
-						wireMcpManagerCallbacks(nextManager);
+						wireMcpManagerCallbacks(
+							nextManager,
+							() => generation === replacementMcpGeneration && mcpManager === nextManager,
+						);
 						nextManager.setOnToolsChanged(tools => {
 							if (generation !== replacementMcpGeneration) return;
 							if (!replacementReady) {
@@ -2307,7 +2312,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				mcpManager = nextManager;
 				ownsMcpManager = Boolean(nextManager);
 				await session.replaceOwnedMcpManager(nextManager);
-				await session.refreshMCPTools((nextManager?.getTools() ?? []) as CustomTool[]);
 				replacementReady = true;
 				if (pendingReplacementTools) {
 					const pending = pendingReplacementTools;
@@ -2321,6 +2325,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							logger.warn("Failed to refresh relocated MCP tools", { error: safeErrorForLog(error) });
 						});
 				}
+				await replacementMcpToolsSync;
+				if (generation !== replacementMcpGeneration) return;
+				await session.refreshMCPTools((nextManager?.getTools() ?? []) as CustomTool[]);
 				if (nextManager) {
 					stagedMcpCleanup.get(nextManager)?.();
 					stagedMcpCleanup.delete(nextManager);
@@ -4436,7 +4443,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						});
 					return conventionalToolsSync;
 				};
+				const managerGeneration = replacementMcpGeneration;
+				const managerForCallbacks = mcpManager;
 				mcpManager.setOnToolsChanged(tools => {
+					if (mcpManager !== managerForCallbacks || managerGeneration !== replacementMcpGeneration) return;
 					void syncConventionalToolsForManager?.(tools as CustomTool[]);
 				});
 				void syncConventionalToolsForManager(mcpManager.getTools() as CustomTool[]);
@@ -4450,7 +4460,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				notificationDebounceTimers.clear();
 			};
 			postmortem.register("mcp-notification-cleanup", clearDebounceTimers);
-			wireMcpManagerCallbacks(mcpManager);
+			const activeManager = mcpManager;
+			wireMcpManagerCallbacks(mcpManager, () => activeManager === mcpManager);
 		}
 
 		// Constructor-time workflow-gate tool restoration is deferred by one
