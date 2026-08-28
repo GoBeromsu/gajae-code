@@ -2037,6 +2037,7 @@ describe("coordinator runtime state sidecar", () => {
 				owner_host_id: await loadInstallationHostId(),
 			}),
 		);
+		await Bun.write(`${stateFile}.lock/protected-payload`, "not-json-secret\n");
 		await persistCoordinatorRuntimeStateFromEvent(assistantEnd("completed"), {
 			sessionId: "orphaned-runtime-lock",
 			cwd: root,
