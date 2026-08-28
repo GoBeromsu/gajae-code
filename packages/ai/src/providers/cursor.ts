@@ -1578,6 +1578,7 @@ async function handleShellStreamArgs(
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
 	execSignal?: AbortSignal,
+	markNonAbortable?: () => void,
 ): Promise<void> {
 	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
 	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
@@ -1698,7 +1699,7 @@ async function handleShellStreamArgs(
 	const streamHandler = execHandlers?.shellStream?.bind(execHandlers);
 	const batchHandler = execHandlers?.shell?.bind(execHandlers);
 	const handler = streamHandler
-		? (shellArgs: ShellArgs) => streamHandler(shellArgs, streamCallbacks, execSignal)
+		? (shellArgs: ShellArgs) => streamHandler(shellArgs, streamCallbacks, execSignal, markNonAbortable)
 		: batchHandler
 			? (shellArgs: ShellArgs) => batchHandler(shellArgs, execSignal)
 			: undefined;
@@ -1988,7 +1989,15 @@ async function handleExecServerMessage(
 		}
 		case "shellStreamArgs": {
 			const args = execMsg.message.value;
-			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult, execSignal);
+			await handleShellStreamArgs(
+				args,
+				execMsg,
+				h2Request,
+				execHandlers,
+				onToolResult,
+				execSignal,
+				markNonAbortable,
+			);
 			return;
 		}
 		case "backgroundShellSpawnArgs": {
