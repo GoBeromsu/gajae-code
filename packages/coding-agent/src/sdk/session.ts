@@ -2446,6 +2446,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			get skills() {
 				return skills;
 			},
+			get rules() {
+				return [...rulebookRules, ...alwaysApplyRules];
+			},
 			eventBus,
 			outputSchema: options.outputSchema,
 			requireYieldTool: options.requireYieldTool,
