@@ -2162,7 +2162,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let ownedPluginServersConnected = false;
 		const notificationDebounceTimers = new Map<string, Timer>();
 		const stagedMcpCleanup = new Map<MCPManager, () => void>();
-		const wireMcpManagerCallbacks = (manager: MCPManager, isCurrent: () => boolean = () => true): void => {
+		const wireMcpManagerCallbacks = (
+			manager: MCPManager,
+			isCurrent: () => boolean = () => true,
+			callbackGeneration = replacementMcpGeneration,
+		): void => {
 			manager.setOnPromptsChanged(serverName => {
 				if (!isCurrent()) return;
 				const promptCommands = buildMCPPromptCommands(manager);
@@ -2182,6 +2186,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					setTimeout(() => {
 						notificationDebounceTimers.delete(key);
 						if (!settings.get("mcp.notifications")) return;
+						if (!isCurrent() || callbackGeneration !== replacementMcpGeneration || mcpManager !== manager) return;
 						session.yieldQueue.enqueue<McpNotificationEntry>("mcp-notification", { serverName, uri });
 					}, debounceMs),
 				);
@@ -2190,6 +2195,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const rebindCwdCapturingAuthority = async (to: string): Promise<void> => {
 			if (!session) return;
 			const generation = ++replacementMcpGeneration;
+			for (const timer of notificationDebounceTimers.values()) clearTimeout(timer);
+			notificationDebounceTimers.clear();
 			let replacementReady = false;
 			let pendingReplacementTools: CustomTool[] | undefined;
 			if (options.mcpManager && !ownsMcpManager) {
@@ -2251,6 +2258,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						wireMcpManagerCallbacks(
 							nextManager,
 							() => generation === replacementMcpGeneration && mcpManager === nextManager,
+							generation,
 						);
 						nextManager.setOnToolsChanged(tools => {
 							if (generation !== replacementMcpGeneration) return;
