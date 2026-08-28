@@ -4467,6 +4467,18 @@ pub(crate) mod platform {
 		edges:     Vec<AuthorityEdge>,
 	}
 
+	impl Drop for SkillRootAuthority {
+		fn drop(&mut self) {
+			// SAFETY: The descriptor was opened by this authority walk. The validity
+			// probe avoids closing a descriptor already released by an established
+			// early-return cleanup path.
+			if unsafe { libc::fcntl(self.file, libc::F_GETFD) } >= 0 {
+				// SAFETY: The descriptor remains owned by this authority until Drop completes.
+				unsafe { libc::close(self.file) };
+			}
+		}
+	}
+
 	fn revalidate_skill_root(authority: &SkillRootAuthority) -> Result<(), &'static str> {
 		for edge in &authority.edges {
 			let parent = fstat(edge.parent.as_raw_fd()).map_err(|_| "identity_mismatch")?;
@@ -4958,6 +4970,31 @@ pub(crate) mod platform {
 				cleanup.err().unwrap_or("durability_failed"),
 			);
 		}
+		if file_mode != 0o600 {
+			// Establish the final mode while the file is still private. A permission
+			// failure must never report failure after the payload becomes visible.
+			if unsafe { libc::fchmod(file.as_raw_fd(), file_mode as libc::mode_t) } != 0 {
+				let code = skill_write_error(&std::io::Error::last_os_error());
+				let cleanup = cleanup_private_skill_file(&file, skill_fd, &private_name);
+				drop(file);
+				unsafe {
+					libc::close(skill_fd);
+					libc::close(skills_fd);
+				}
+				return NativeSecureSkillWriteResult::failure(cleanup.err().unwrap_or(code));
+			}
+			if file.sync_all().is_err() {
+				let cleanup = cleanup_private_skill_file(&file, skill_fd, &private_name);
+				drop(file);
+				unsafe {
+					libc::close(skill_fd);
+					libc::close(skills_fd);
+				}
+				return NativeSecureSkillWriteResult::failure(
+					cleanup.err().unwrap_or("durability_failed"),
+				);
+			}
+		}
 		let private_fd = file.as_raw_fd();
 		match replace_skill_file_name(
 			skill_fd,
@@ -4985,25 +5022,6 @@ pub(crate) mod platform {
 				}
 				return NativeSecureSkillWriteResult::failure(code);
 			},
-		}
-		if file_mode != 0o600 {
-			if unsafe { libc::fchmod(private_fd, file_mode as libc::mode_t) } != 0 {
-				let code = skill_write_error(&std::io::Error::last_os_error());
-				drop(file);
-				unsafe {
-					libc::close(skill_fd);
-					libc::close(skills_fd);
-				}
-				return NativeSecureSkillWriteResult::failure(code);
-			}
-			if file.sync_all().is_err() {
-				drop(file);
-				unsafe {
-					libc::close(skill_fd);
-					libc::close(skills_fd);
-				}
-				return NativeSecureSkillWriteResult::failure("durability_failed");
-			}
 		}
 		if revalidate_skill_directory(&root, &skill_component, skill_fd).is_err() {
 			drop(file);
