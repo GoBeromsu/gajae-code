@@ -2320,6 +2320,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				mcpManager = nextManager;
 				ownsMcpManager = Boolean(nextManager);
 				await session.replaceOwnedMcpManager(nextManager);
+				session.setMCPPromptCommands(nextManager ? buildMCPPromptCommands(nextManager) : []);
 				replacementReady = true;
 				if (pendingReplacementTools) {
 					const pending = pendingReplacementTools;
