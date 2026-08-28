@@ -1152,6 +1152,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const internalUrlOptions: InternalUrlExpansionOptions = {
 			skills: this.session.skills ?? [],
 			rules: this.session.rules,
+			memoryRoot: this.session.memoryRoot,
 			internalRouter: InternalUrlRouter.instance(),
 			localOptions: this.session.localProtocolOptions ?? {
 				getArtifactsDir: this.session.getArtifactsDir,

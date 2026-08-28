@@ -115,6 +115,7 @@ import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { HindsightSessionState } from "../hindsight/state";
 import { normalizePluginHook } from "../hooks/normalize";
 import { initializeLocalRoot, LocalProtocolHandler, type LocalProtocolOptions } from "../internal-urls";
+import { getMemoryRootForSession } from "../internal-urls/memory-protocol";
 import type { LspStartupServerInfo } from "../lsp";
 import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
@@ -2468,6 +2469,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						getSessionId: () => sessionManager.getSessionId(),
 					}
 				);
+			},
+			get memoryRoot() {
+				return getMemoryRootForSession(agentDir, sessionManager.getCwd());
 			},
 			eventBus,
 			outputSchema: options.outputSchema,
