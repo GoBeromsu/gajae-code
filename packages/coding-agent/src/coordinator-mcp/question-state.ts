@@ -2526,7 +2526,7 @@ export async function replaceCreationRetirementIntent(
 		if (request.phase !== "remote_started" && request.phase !== "uncertain" && request.phase !== "retired")
 			throw new Error("retire_not_allowed");
 		const staged = request.retirement_intent;
-		if (!staged || staged.phase !== "intent" || staged.broker_proof) throw new Error("state_corrupt");
+		if (staged?.phase !== "intent" || staged.broker_proof) throw new Error("state_corrupt");
 		if (staged.retirement_key_digest !== retirementKeyDigest) throw new Error("idempotency_conflict");
 		assertCreationRetirementProofMatches(request, proof, false);
 		staged.phase = "pre_effect_rejected";
