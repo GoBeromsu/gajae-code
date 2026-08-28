@@ -2390,6 +2390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					error: safeErrorForLog(error),
 					cwd: to,
 				});
+				throw error;
 			}
 			if (settings.get("secrets.enabled")) {
 				try {
@@ -2398,6 +2399,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					secretsEnabled = obfuscator?.hasSecrets() === true;
 					session?.setObfuscator(obfuscator);
 				} catch (error) {
+					obfuscator = undefined;
+					secretsEnabled = false;
+					session?.setObfuscator(undefined);
 					logger.warn("Failed to reload secrets after session rescope", {
 						error: safeErrorForLog(error),
 						cwd: to,
