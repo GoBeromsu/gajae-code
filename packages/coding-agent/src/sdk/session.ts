@@ -2202,6 +2202,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				session.setSettings(settings);
 				toolSession.settings = settings;
 			}
+			if (settings.get("secrets.enabled")) {
+				const entries = [...secretApi.collectEnvSecrets(), ...(await secretApi.loadSecrets(to, agentDir))];
+				obfuscator = entries.length > 0 ? secretApi.createSecretObfuscator(entries) : undefined;
+				secretsEnabled = obfuscator?.hasSecrets() === true;
+				session.setObfuscator(obfuscator);
+			} else {
+				obfuscator = undefined;
+				secretsEnabled = false;
+				session.setObfuscator(undefined);
+			}
 			for (const timer of notificationDebounceTimers.values()) clearTimeout(timer);
 			notificationDebounceTimers.clear();
 			let replacementReady = false;
@@ -2446,6 +2456,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						error: safeErrorForLog(error),
 						cwd: to,
 					});
+					throw error;
 				}
 			} else {
 				obfuscator = undefined;
