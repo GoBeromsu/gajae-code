@@ -501,6 +501,7 @@ export class Settings implements NotificationSettingsReader {
 	#configPath: string | null;
 	#cwd: string;
 	#agentDir: string;
+	#agentDirExplicit: boolean;
 	#storage: AgentStorage | null = null;
 	#isolatedStorage = false;
 
@@ -559,6 +560,7 @@ export class Settings implements NotificationSettingsReader {
 
 	private constructor(options: SettingsOptions = {}, isolatedStorage = false) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
+		this.#agentDirExplicit = options.agentDir !== undefined;
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.resolve(this.#agentDir, "config.yml");
 		this.#persist = !options.inMemory && !options.readonly;
@@ -1161,6 +1163,11 @@ export class Settings implements NotificationSettingsReader {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	/** Whether this Settings instance was explicitly bound to an agent directory. */
+	isAgentDirExplicit(): boolean {
+		return this.#agentDirExplicit;
 	}
 
 	getPlansDirectory(): string {
