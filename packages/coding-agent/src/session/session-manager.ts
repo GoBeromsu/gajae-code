@@ -11064,12 +11064,16 @@ export class SessionManager {
 									throw new Error("managed_move_source_restore_mismatch");
 							}
 						}
-						if (
-							managedSourceStore &&
-							managedTranscript &&
-							!managedSourceStore.readExpected(path.basename(oldSessionFile))
-						)
-							await managedSourceStore.publishNoReplace(path.basename(oldSessionFile), managedTranscript.bytes);
+						if (managedSourceStore && managedTranscript) {
+							const source = managedSourceStore.readExpected(path.basename(oldSessionFile));
+							if (source && !managedFileSnapshotEquals(source, managedTranscript))
+								throw new Error("managed_move_source_replaced");
+							if (!source)
+								await managedSourceStore.publishNoReplace(
+									path.basename(oldSessionFile),
+									managedTranscript.bytes,
+								);
+						}
 					} catch (rollbackErr) {
 						discardResidentTransitionAndThrow(
 							new Error(`Failed to rollback managed move: ${toError(rollbackErr).message}`, {
