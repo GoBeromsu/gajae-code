@@ -2685,6 +2685,17 @@
 		}
 	},
 	{
+		"sourceId": "agent_session:setTtsrManager",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "internal cwd-rescope rules-state rebinding, not a user-facing SDK control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
 		"sourceId": "agent_session:markPlanCompactAbortPending",
 		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
 		"sourceKind": "agent_session",
@@ -3152,6 +3163,17 @@
 		}
 	},
 	{
+		"sourceId": "agent_session:rebindMCPSelectionMetadata",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "internal cwd-rescope MCP selection rebinding, not a user-facing SDK control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
 		"sourceId": "agent_session:refreshGjcSubskillTools",
 		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
 		"sourceKind": "agent_session",
@@ -3540,6 +3562,39 @@
 		"sourceKind": "agent_session",
 		"decision": "exclude",
 		"rationale": "internal accessor/plumbing, not a user-facing control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
+		"sourceId": "agent_session:setSettings",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "internal cwd-rescope settings rebinding, not a user-facing SDK control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
+		"sourceId": "agent_session:setObfuscator",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "internal cwd-rescope secret-mask rebinding, not a user-facing SDK control seam",
+		"exclusionMetadata": {
+			"adapterMappings": "not_applicable",
+			"testIds": "not_applicable"
+		}
+	},
+	{
+		"sourceId": "agent_session:setPromptTemplates",
+		"sourceFile": "packages/coding-agent/src/session/agent-session.ts",
+		"sourceKind": "agent_session",
+		"decision": "exclude",
+		"rationale": "internal cwd-rescope prompt-template rebinding, not a user-facing SDK control seam",
 		"exclusionMetadata": {
 			"adapterMappings": "not_applicable",
 			"testIds": "not_applicable"
