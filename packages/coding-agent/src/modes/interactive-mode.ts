@@ -1139,6 +1139,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Reload slash commands and autocomplete for the provided working directory. */
 	async refreshSlashCommandState(cwd?: string): Promise<void> {
 		if (this.#stopped) return;
+		this.settings = this.session.settings;
 		const basePath = cwd ?? this.sessionManager.getCwd();
 		const fileCommands = await loadSlashCommands({
 			cwd: basePath,
@@ -1164,7 +1165,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#rebuildSkillSlashCommands(fileCommandNames: ReadonlySet<string> = new Set()): SlashCommand[] {
 		this.skillCommands.clear();
-		if (!settings.get("skills.enableSkillCommands")) {
+		if (!this.settings.get("skills.enableSkillCommands")) {
 			return [];
 		}
 		const reservedDirectCommandNames = new Set([
