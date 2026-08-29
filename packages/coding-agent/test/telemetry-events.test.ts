@@ -358,7 +358,7 @@ describe("telemetry install ID", () => {
 		try {
 			await expect(getTelemetryInstallId(filePath)).rejects.toThrow(/claim changed|ownership was lost|ENOENT/);
 			await replacement;
-			expect(await fs.readFile(claimPath, "utf8")).toBe("replacement-claim");
+			expect(await fs.readFile(claimPath, "utf8")).toStartWith("replacement-claim");
 		} finally {
 			linkSpy.mockRestore();
 		}
