@@ -283,7 +283,7 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		handle = await fs.open(claimPath, "r+");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
-		const record = Buffer.from(serializeClaim(token, claim.state, Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
+		const record = Buffer.from(serializeClaim(token, claim.state));
 		await writeClaimRecord(handle, record, Number(reopened.size));
 		await handle.sync();
 		await fs.utimes(claimPath, new Date(), new Date());
@@ -391,8 +391,8 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 			const claim = await readClaimIdentity(claimPath);
 			const publishingExpired =
 				claim?.state === "publishing" &&
-				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now()) ||
-					(claim.expiresAt === undefined && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS));
+				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now() - INSTALL_ID_CLAIM_LEASE_MS) ||
+					(claim.expiresAt === undefined && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_TIMEOUT_MS));
 			const committedStale =
 				claim?.state === "committed" &&
 				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now()) ||
