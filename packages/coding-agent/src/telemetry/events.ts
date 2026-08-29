@@ -177,6 +177,11 @@ async function readExistingInstallId(filePath: string): Promise<string> {
 		try {
 			return await readExistingInstallIdSnapshot(filePath);
 		} catch (error) {
+			if (error instanceof Error && error.message === "telemetry install ID is malformed") {
+				if (performance.now() >= deadline) throw error;
+				await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
+				continue;
+			}
 			if ((error as NodeJS.ErrnoException).code !== "ECLAIMRACE") throw error;
 			if (performance.now() >= deadline) throw new Error("telemetry install ID claim did not clear");
 			await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
@@ -269,7 +274,15 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 			});
 		}
 		await durability.promise;
-		const value = await readPublishedInstallId(filePath);
+		let value: string;
+		try {
+			value = await readPublishedInstallId(filePath);
+		} catch (error) {
+			if (!(error instanceof Error) || error.message !== "telemetry install ID is malformed") throw error;
+			if (performance.now() >= deadline) throw error;
+			await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
+			continue;
+		}
 		const after = await fs.lstat(filePath, { bigint: true });
 		const afterKey = `${after.dev}:${after.ino}:${after.size}:${after.mtimeNs}`;
 		if (afterKey !== identityKey) continue;

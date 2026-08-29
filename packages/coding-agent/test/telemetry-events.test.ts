@@ -546,6 +546,23 @@ describe("telemetry install ID", () => {
 		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
 	});
 
+	it("waits for a changing legacy destination to complete", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		await fs.writeFile(filePath, "", { mode: 0o600 });
+		const completion = setTimeout(() => {
+			void fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n");
+		}, 75);
+		completion.unref();
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+		} finally {
+			clearTimeout(completion);
+		}
+	});
+
 	it("uses bounded claim polls and promptly observes release", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
