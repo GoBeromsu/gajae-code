@@ -96,6 +96,57 @@ describe("move_session tool (agent-invokable session rescope)", () => {
 			await session.dispose();
 		}
 	}, 20_000);
+
+	it("transfers SDK process-cwd ownership from a cold fork before move_session", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `gjc-move-session-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwdA = path.join(tempDir, "root");
+		const cwdB = path.join(cwdA, "repo-b");
+		fs.mkdirSync(cwdB, { recursive: true });
+		const processCwdBefore = process.cwd();
+		process.chdir(cwdA);
+		const sessionManager = SessionManager.create(cwdA, SessionManager.explicitDestination(tempDir));
+		const { session } = await makeSession(cwdA, sessionManager, { toolNames: ["move_session"] });
+		try {
+			expect(SessionManager.isProcessCwdOwner(sessionManager)).toBe(true);
+			sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "seed response" }],
+				api: "openai-completions",
+				provider: "openai",
+				model: "gpt-4o-mini",
+				stopReason: "stop",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			});
+			await sessionManager.flush();
+			const memoryStats = sessionManager.getSessionMemoryStats();
+			vi.spyOn(sessionManager, "getSessionMemoryStats").mockReturnValue({
+				...memoryStats,
+				coldRetirementActive: true,
+			});
+
+			await expect(session.fork()).resolves.toBe(true);
+			const moveTool = session.getToolByName("move_session");
+			if (!moveTool) throw new Error("Expected move_session after fork");
+			await moveTool.execute("move-after-fork", { path: cwdB });
+
+			expect(process.cwd()).toBe(cwdB);
+			expect(session.sessionManager.getCwd()).toBe(cwdB);
+		} finally {
+			await session.dispose();
+			process.chdir(processCwdBefore);
+		}
+	}, 30_000);
+
 	it("lets a sequential fenced bash call follow a completed move", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `gjc-move-session-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
