@@ -936,6 +936,12 @@ export declare function exactUnlink(path: string, identity: NativeExactFileIdent
 export declare function exactUnlinkDirect(path: string, identity: NativeExactFileIdentity): NativeExactUnlinkResult
 
 /**
+ * Run direct exact unlink on the libuv blocking pool so a slow cleanup cannot
+ * stall JavaScript timers or process lifecycle progress.
+ */
+export declare function exactUnlinkDirectAsync(path: string, identity: NativeExactFileIdentity): Promise<NativeExactUnlinkResult>
+
+/**
  * Execute a brush shell command.
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
