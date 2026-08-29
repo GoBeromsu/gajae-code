@@ -184,7 +184,8 @@ async function readExistingInstallIdSnapshot(filePath: string): Promise<string> 
 	try {
 		const existing = (await Bun.file(filePath).text()).trim();
 		const claimAfter = await readClaimIdentity(claimPath);
-		if (UUID_V4.test(existing) && claimBefore === undefined && claimAfter === undefined) return existing;
+		if (UUID_V4.test(existing) && claimBefore === undefined && claimAfter === undefined)
+			return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
 		if (UUID_V4.test(existing) && claimBefore !== undefined && claimAfter === undefined)
 			return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
 	} catch (error) {
@@ -249,6 +250,7 @@ function claimRaceError(): NodeJS.ErrnoException {
 async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: string): Promise<string> {
 	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
 	while (true) {
+		await syncDirectory(path.dirname(filePath));
 		const value = await readPublishedInstallId(filePath);
 		try {
 			if (await readClaimIdentity(claimPath)) {
@@ -362,6 +364,10 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 				claim?.state === "publishing" && claim.expiresAt !== undefined && claim.expiresAt <= Date.now();
 			const committedStale = claim?.state === "committed" && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS;
 			if (publishingExpired || committedStale) {
+				if (publishingExpired && !(await pathExists(`${claimPath.slice(0, -5)}`))) {
+					await Bun.sleep(INSTALL_ID_CLAIM_DELAY_MS);
+					continue;
+				}
 				await reclaimStaleClaim(claimPath, stat, claim);
 				continue;
 			}
@@ -374,6 +380,16 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 		await Bun.sleep(INSTALL_ID_CLAIM_DELAY_MS);
 	}
 	throw new Error("telemetry install ID claim did not clear");
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.lstat(filePath);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
 }
 
 async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, claim: ClaimIdentity): Promise<void> {
