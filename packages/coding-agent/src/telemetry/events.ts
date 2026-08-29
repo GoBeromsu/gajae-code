@@ -278,12 +278,12 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		if (named.dev !== opened.dev || named.ino !== opened.ino) return;
 		const content = await handle.readFile({ encoding: "utf8" });
 		const claim = parseClaim(content);
-		if (claim.token !== token || claim.state !== "publishing") return;
+		if (claim.token !== token || claim.state === undefined) return;
 		await handle.close();
 		handle = await fs.open(claimPath, "r+");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
-		const record = Buffer.from(serializeClaim(token, "publishing"));
+		const record = Buffer.from(serializeClaim(token, claim.state, Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
 		await writeClaimRecord(handle, record, Number(reopened.size));
 		await handle.sync();
 		await fs.utimes(claimPath, new Date(), new Date());
@@ -322,15 +322,24 @@ async function transitionClaimCommitted(claimPath: string, token: string): Promi
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== before.dev || reopened.ino !== before.ino)
 			throw new Error("telemetry install ID claim changed");
-		const record = Buffer.from(serializeClaim(token, "committed"));
+		const record = Buffer.from(serializeClaim(token, "committed", Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
 		await writeClaimRecord(handle, record, Number(reopened.size));
-		await handle.sync();
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
 		if (code === "ENOENT" || code === "ECLAIMRACE") throw claimLostError();
 		throw error;
 	} finally {
 		await handle?.close();
+	}
+	await assertClaimOwned(claimPath, token, "committed");
+}
+
+async function syncClaimDurably(claimPath: string, token: string): Promise<void> {
+	const handle = await fs.open(claimPath, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
 	}
 	await assertClaimOwned(claimPath, token, "committed");
 }
@@ -384,7 +393,10 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 				claim?.state === "publishing" &&
 				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now()) ||
 					(claim.expiresAt === undefined && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS));
-			const committedStale = claim?.state === "committed" && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS;
+			const committedStale =
+				claim?.state === "committed" &&
+				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now()) ||
+					(claim.expiresAt === undefined && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS));
 			if (publishingExpired || committedStale) {
 				await reclaimStaleClaim(claimPath, stat, claim);
 				continue;
@@ -558,6 +570,13 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		await heartbeat;
 		if (heartbeatFailure !== undefined) throw heartbeatFailure;
 		await transitionClaimCommitted(claimPath, token);
+		heartbeatStopped = false;
+		scheduleHeartbeat();
+		await syncClaimDurably(claimPath, token);
+		heartbeatStopped = true;
+		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
+		await heartbeat;
+		if (heartbeatFailure !== undefined) throw heartbeatFailure;
 		committed = true;
 		return installId;
 	} finally {

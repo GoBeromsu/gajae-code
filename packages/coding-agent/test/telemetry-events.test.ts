@@ -674,6 +674,57 @@ describe("telemetry install ID", () => {
 		}
 	});
 
+	it("keeps a committed transition leased during slow sync", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		let releaseCommitSync!: () => void;
+		let commitSyncStarted!: () => void;
+		const commitGate = new Promise<void>(resolve => {
+			releaseCommitSync = resolve;
+		});
+		const commitStarted = new Promise<void>(resolve => {
+			commitSyncStarted = resolve;
+		});
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (String(args[0]) === claimPath && args[1] === "r") {
+				const originalSync = handle.sync.bind(handle);
+				handle.sync = async () => {
+					if (await fs.stat(filePath).catch(() => undefined)) {
+						commitSyncStarted();
+						await commitGate;
+					}
+					await originalSync();
+				};
+			}
+			return handle;
+		});
+
+		try {
+			const publisher = getTelemetryInstallId(filePath);
+			await commitStarted;
+			let readerFinished = false;
+			const reader = getTelemetryInstallId(filePath).then(() => {
+				readerFinished = true;
+			});
+			await Bun.sleep(1_200);
+			expect(readerFinished).toBe(false);
+			releaseCommitSync();
+			await Promise.all([publisher, reader]);
+		} finally {
+			releaseCommitSync();
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
+
 	it("preserves large bigint claim identities without numeric rounding", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
