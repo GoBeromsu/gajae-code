@@ -170,7 +170,12 @@ export async function runManagedOwnerSupervisor(): Promise<void> {
 		env: { ...process.env, [MANAGED_OWNER_CHILD_TOKEN_ENV]: childToken },
 	});
 	const childStartTime = await managedOwnerProcessProvenance(child.pid);
-	if (!childStartTime) throw new Error("managed_owner_child_start_time_unavailable");
+	if (!childStartTime) {
+		const exitCode = await child.exited;
+		await publishUnexpectedOwnerExit(stateDir, sessionId, generation, exitCode, child.signalCode);
+		process.exitCode = exitCode;
+		return;
+	}
 	const childProcess = nativeProcessBindings().Process.fromPid(child.pid);
 	if (!childProcess) {
 		const exitCode = await child.exited;
@@ -196,6 +201,7 @@ export async function runManagedOwnerSupervisor(): Promise<void> {
 			process.exitCode = 134;
 			return;
 		}
+		await publishUnexpectedOwnerExit(stateDir, sessionId, generation, exitCode, child.signalCode);
 		process.exitCode = exitCode;
 		return;
 	}
@@ -313,6 +319,29 @@ export async function runManagedOwnerSupervisor(): Promise<void> {
 		return;
 	}
 	process.exitCode = exitCode;
+}
+
+async function publishUnexpectedOwnerExit(
+	stateDir: string,
+	sessionId: string,
+	generation: string,
+	exitCode: number,
+	signal: NodeJS.Signals | null,
+): Promise<void> {
+	await observeOwnerTerminal({
+		schema_version: 1,
+		op: "observe_terminal",
+		session_id: sessionId,
+		owner_generation: generation,
+		state_dir: stateDir,
+		socket_key: process.env[GJC_TMUX_OWNER_SERVER_KEY_ENV] ?? "",
+		observer: "raw_monitor",
+		observed_at: new Date().toISOString(),
+		signal: normalizeTerminalSignal(signal),
+		exit_code: exitCode,
+		exit_kind: signal ?? "supervisor_child_exit",
+		reason: "managed_owner_supervisor_unexpected_exit",
+	}).catch(() => undefined);
 }
 
 function normalizeTerminalSignal(signal: NodeJS.Signals | null): TerminalSignal {
