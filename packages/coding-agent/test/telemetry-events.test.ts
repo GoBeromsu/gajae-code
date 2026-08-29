@@ -89,6 +89,27 @@ describe("telemetry install ID", () => {
 		await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
 	});
 
+	it("publishes only complete payloads despite a delayed competing publisher", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const originalLink = fs.link.bind(fs);
+		let linkCalls = 0;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async (temporaryPath, destinationPath) => {
+			if (linkCalls++ === 0) await Bun.sleep(150);
+			return originalLink(temporaryPath, destinationPath);
+		});
+
+		try {
+			const ids = await Promise.all([getTelemetryInstallId(filePath), getTelemetryInstallId(filePath)]);
+			expect(ids[0]).toBe(ids[1]);
+			expect((await fs.readFile(filePath, "utf8")).endsWith("\n")).toBe(true);
+			expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+		} finally {
+			linkSpy.mockRestore();
+		}
+	});
+
 	it("tightens permissions when reusing an existing valid ID", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
@@ -110,49 +131,24 @@ describe("telemetry install ID", () => {
 		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
 	});
 
-	it("converges after an empty and partial winner payload", async () => {
+	it("does not adopt stale temporary payloads and cleans its own temporary file", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
-		const originalOpen = fs.open.bind(fs);
-		const openSpy = spyOn(fs, "open").mockImplementationOnce(async () => {
-			const winner = await originalOpen(filePath, "w", 0o644);
-			await winner.close();
-			setTimeout(() => {
-				void fs
-					.writeFile(filePath, "123e4567-e89b-", { mode: 0o644 })
-					.then(() => fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o644 }));
-			}, 10);
-			const error = new Error("file already exists") as NodeJS.ErrnoException;
-			error.code = "EEXIST";
-			throw error;
-		});
+		const staleTempPath = `${filePath}.stale.tmp`;
+		await fs.writeFile(staleTempPath, "not-a-published-id\n", { mode: 0o600 });
 
-		try {
-			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
-			expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
-		} finally {
-			openSpy.mockRestore();
-		}
+		const id = await getTelemetryInstallId(filePath);
+		expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+		expect(await fs.readFile(staleTempPath, "utf8")).toBe("not-a-published-id\n");
+		expect((await fs.readdir(directory)).sort()).toEqual(["telemetry-install-id", "telemetry-install-id.stale.tmp"]);
 	});
 
 	it("fails closed when a raced winner never publishes a valid UUID", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
-		const originalOpen = fs.open.bind(fs);
-		const openSpy = spyOn(fs, "open").mockImplementationOnce(async () => {
-			const winner = await originalOpen(filePath, "w", 0o600);
-			await winner.close();
-			const error = new Error("file already exists") as NodeJS.ErrnoException;
-			error.code = "EEXIST";
-			throw error;
-		});
-
-		try {
-			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
-		} finally {
-			openSpy.mockRestore();
-		}
+		await fs.writeFile(filePath, "", { mode: 0o600 });
+		await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
 	});
 });
