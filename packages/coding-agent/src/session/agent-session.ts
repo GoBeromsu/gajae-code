@@ -8743,8 +8743,6 @@ export class AgentSession {
 		// is already failure-absorbing, so this only waits.
 		await this.#coordinatorPersistQueue;
 		this.#pendingBackgroundExchanges = [];
-		this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainMessages(true));
-		this.yieldQueue.clear();
 
 		this.agent.setOnBeforeYield(undefined);
 		try {
@@ -8764,6 +8762,8 @@ export class AgentSession {
 		// the session that owns the manager goes on to dispose it (which itself
 		// nukes any leftover jobs and pending deliveries).
 		this.#cancelOwnAsyncJobs();
+		this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainMessages(true));
+		this.yieldQueue.clear();
 		await Promise.allSettled(this.#deferredOwnerShutdownFinalizations);
 		const ownedAsyncManager = this.#ownedAsyncJobManager;
 		if (ownedAsyncManager && this.#disposeAsyncJobManager) {
