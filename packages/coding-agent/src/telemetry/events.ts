@@ -1,6 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import type { BigIntStats, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { exactUnlinkDirect, renameNoReplacePathAsync } from "@gajae-code/natives";
 import { getTrustedAgentFile } from "@gajae-code/utils";
 
 export const TELEMETRY_SCHEMA_VERSION = 1 as const;
@@ -42,7 +44,8 @@ const RESULTS = new Set(["available", "up_to_date", "installed", "failed", "skip
 const INSTALL_METHODS = new Set(["bun", "npm", "binary", "migrate"]);
 const FORBIDDEN_KEY = /(?:prompt|argv|path|env|secret|account|model|provider|repo|error|hostname|username|machine|ip)/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const INSTALL_ID_CLAIM_TIMEOUT_MS = 100;
+const INSTALL_ID_CLAIM_TIMEOUT_MS = 2_000;
+const INSTALL_ID_CLAIM_LEASE_MS = 2_000;
 const INSTALL_ID_CLAIM_DELAY_MS = 1;
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
@@ -137,9 +140,19 @@ function isHardLinkUnsupported(error: unknown): boolean {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-	const handle = await fs.open(directory, "r");
+	let handle: fs.FileHandle;
 	try {
-		await handle.sync();
+		handle = await fs.open(directory, "r");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+		throw error;
+	}
+	try {
+		try {
+			await handle.sync();
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+		}
 	} finally {
 		await handle.close();
 	}
@@ -153,35 +166,74 @@ async function readPublishedInstallId(filePath: string): Promise<string> {
 
 async function readExistingInstallId(filePath: string): Promise<string> {
 	const claimPath = `${filePath}.lock`;
+	const claimBefore = await readClaimIdentity(claimPath);
+	let fileMissing = false;
 	try {
 		const existing = (await Bun.file(filePath).text()).trim();
-		if (UUID_V4.test(existing)) return existing;
-		try {
-			await fs.access(claimPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("telemetry install ID is malformed");
-			throw error;
-		}
-		await waitForClaimRelease(claimPath);
-		return await readPublishedInstallId(filePath);
+		if (UUID_V4.test(existing) && claimBefore === undefined && !(await claimChangedOrPresent(claimPath, claimBefore)))
+			return existing;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		try {
-			await fs.access(claimPath);
-		} catch (claimError) {
-			if ((claimError as NodeJS.ErrnoException).code === "ENOENT") throw error;
-			throw claimError;
-		}
-		await waitForClaimRelease(claimPath);
-		return await readPublishedInstallId(filePath);
+		fileMissing = true;
 	}
+	if (!(await readClaimIdentity(claimPath))) {
+		if (fileMissing) {
+			const missing = new Error("telemetry install ID is missing") as NodeJS.ErrnoException;
+			missing.code = "ENOENT";
+			throw missing;
+		}
+		throw new Error("telemetry install ID is malformed");
+	}
+	await waitForClaimRelease(claimPath);
+	return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
+}
+
+type ClaimIdentity = { dev: bigint; ino: bigint; mtimeMs: number; token: string; expiresAt: number | undefined };
+
+async function readClaimIdentity(claimPath: string): Promise<ClaimIdentity | undefined> {
+	try {
+		const stat = await fs.lstat(claimPath, { bigint: true });
+		const content = await fs.readFile(claimPath, "utf8");
+		const [token, expiry] = content.split("\n", 3);
+		const expiresAt = expiry === undefined ? undefined : Number(expiry);
+		return {
+			dev: stat.dev,
+			ino: stat.ino,
+			mtimeMs: Number(stat.mtimeMs),
+			token,
+			expiresAt: Number.isFinite(expiresAt) ? expiresAt : undefined,
+		};
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+async function claimChangedOrPresent(claimPath: string, before: ClaimIdentity | undefined): Promise<boolean> {
+	const after = await readClaimIdentity(claimPath);
+	if (!before) return after !== undefined;
+	return after === undefined || after.dev !== before.dev || after.ino !== before.ino || after.token !== before.token;
+}
+
+async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: string): Promise<string> {
+	const value = await readPublishedInstallId(filePath);
+	if (await readClaimIdentity(claimPath)) {
+		await waitForClaimRelease(claimPath);
+		return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
+	}
+	return value;
 }
 
 async function waitForClaimRelease(claimPath: string): Promise<void> {
 	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		try {
-			await fs.access(claimPath);
+			const stat = await fs.stat(claimPath);
+			const claim = await readClaimIdentity(claimPath);
+			if (claim?.expiresAt !== undefined && claim.expiresAt <= Date.now()) {
+				await reclaimStaleClaim(claimPath, stat);
+				continue;
+			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 			throw error;
@@ -191,9 +243,42 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 	throw new Error("telemetry install ID claim did not clear");
 }
 
+async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats): Promise<void> {
+	if (!stat.isFile()) return;
+	const content = await fs.readFile(claimPath);
+	const current = await fs.lstat(claimPath, { bigint: true });
+	if (current.dev !== BigInt(stat.dev) || current.ino !== BigInt(stat.ino)) return;
+	const result = exactUnlinkDirect(claimPath, {
+		dev: current.dev,
+		ino: current.ino,
+		nlink: current.nlink,
+		size: current.size,
+		mtimeNs: current.mtimeNs,
+		sha256: createHash("sha256").update(content).digest("hex"),
+		quarantineName: `.${path.basename(claimPath)}.${randomUUID()}.quarantine`,
+	});
+	if (!result.ok && result.code !== "not_found" && result.code !== "identity_mismatch")
+		throw new Error(`telemetry stale claim recovery failed: ${result.code ?? "unknown"}`);
+}
+
 async function removeOwnedClaim(claimPath: string, token: string): Promise<void> {
 	try {
-		if ((await Bun.file(claimPath).text()) === token) await fs.rm(claimPath, { force: true });
+		const stat = await fs.lstat(claimPath, { bigint: true });
+		const content = await fs.readFile(claimPath, "utf8");
+		if (content.split("\n", 1)[0] !== token) return;
+		const current = await fs.lstat(claimPath, { bigint: true });
+		if (current.dev !== stat.dev || current.ino !== stat.ino) return;
+		const result = exactUnlinkDirect(claimPath, {
+			dev: stat.dev,
+			ino: stat.ino,
+			nlink: stat.nlink,
+			size: stat.size,
+			mtimeNs: stat.mtimeNs,
+			sha256: createHash("sha256").update(content).digest("hex"),
+			quarantineName: `.${path.basename(claimPath)}.${randomUUID()}.quarantine`,
+		});
+		if (!result.ok && result.code !== "not_found" && result.code !== "identity_mismatch")
+			throw new Error(`telemetry claim cleanup failed: ${result.code ?? "unknown"}`);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
@@ -202,6 +287,7 @@ async function removeOwnedClaim(claimPath: string, token: string): Promise<void>
 async function publishWithClaim(filePath: string, installId: string): Promise<string> {
 	const claimPath = `${filePath}.lock`;
 	const token = randomUUID();
+	const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
 	let ownsClaim = false;
 	let claim: fs.FileHandle;
 	try {
@@ -216,9 +302,9 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			throw error;
 		}
 		try {
-			await claim.writeFile(token, "utf8");
+			await claim.writeFile(`${token}\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
 			await claim.sync();
-			ownsClaim = (await Bun.file(claimPath).text()) === token;
+			ownsClaim = (await Bun.file(claimPath).text()).split("\n", 1)[0] === token;
 		} finally {
 			await claim.close();
 		}
@@ -230,7 +316,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		}
 		let handle: fs.FileHandle;
 		try {
-			handle = await fs.open(filePath, "wx", 0o600);
+			handle = await fs.open(temporaryPath, "wx", 0o600);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			return await readPublishedInstallId(filePath);
@@ -241,9 +327,16 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		} finally {
 			await handle.close();
 		}
+		const publication = await renameNoReplacePathAsync(temporaryPath, filePath);
+		if (!publication.ok) {
+			if (publication.code !== "destination_exists")
+				throw new Error(`telemetry install ID publication failed: ${publication.reason}`);
+			return await readPublishedInstallId(filePath);
+		}
 		await syncDirectory(path.dirname(filePath));
 		return installId;
 	} finally {
+		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
 		if (ownsClaim) await removeOwnedClaim(claimPath, token).catch(() => undefined);
 	}
 }

@@ -210,4 +210,113 @@ describe("telemetry install ID", () => {
 		await fs.writeFile(filePath, "", { mode: 0o600 });
 		await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
 	});
+
+	it("recovers an expired claim without adopting a partial payload", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		await fs.writeFile(`${filePath}.lock`, `crashed-publisher\n${Date.now() - 1}`, { mode: 0o600 });
+		await fs.writeFile(`${filePath}.crashed.tmp`, "", { mode: 0o600 });
+
+		const id = await getTelemetryInstallId(filePath);
+		expect(id).toMatch(UUID_PATTERN);
+		expect(await fs.readFile(`${filePath}.crashed.tmp`, "utf8")).toBe("");
+		expect((await fs.readdir(directory)).sort()).toEqual([
+			"telemetry-install-id",
+			"telemetry-install-id.crashed.tmp",
+		]);
+	});
+
+	it("does not delete a replacement claim during stale recovery", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(claimPath, `expired\n${Date.now() - 1}`, { mode: 0o600 });
+		const originalReadFile = fs.readFile.bind(fs);
+		let replaced = false;
+		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
+			const result = await originalReadFile(file, options as never);
+			if (!replaced && String(file) === claimPath) {
+				replaced = true;
+				await fs.rm(claimPath);
+				await fs.writeFile(claimPath, "replacement-claim", { mode: 0o600 });
+			}
+			return result as never;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+			expect(await fs.readFile(claimPath, "utf8")).toBe("replacement-claim");
+		} finally {
+			readSpy.mockRestore();
+		}
+	});
+
+	it("treats a Windows EPERM directory sync as a supported durability limitation", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const originalOpen = fs.open.bind(fs);
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			if (String(args[0]) === directory) {
+				const error = new Error("directory handles are unsupported") as NodeJS.ErrnoException;
+				error.code = "EPERM";
+				throw error;
+			}
+			return originalOpen(...args);
+		});
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
+	it("keeps readers behind the claim until the publisher sync completes", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		const originalOpen = fs.open.bind(fs);
+		let releaseSync!: () => void;
+		const syncPaused = new Promise<void>(resolve => {
+			releaseSync = resolve;
+		});
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await originalOpen(...args);
+			if (String(args[0]) === directory) {
+				const originalSync = handle.sync.bind(handle);
+				handle.sync = async () => {
+					await syncPaused;
+					await originalSync();
+				};
+			}
+			return handle;
+		});
+
+		try {
+			const publisher = getTelemetryInstallId(filePath);
+			while (!(await fs.stat(`${filePath}.lock`).catch(() => undefined))) await Bun.sleep(1);
+			let readerFinished = false;
+			const reader = getTelemetryInstallId(filePath).then(() => {
+				readerFinished = true;
+			});
+			await Bun.sleep(10);
+			expect(readerFinished).toBe(false);
+			releaseSync();
+			await Promise.all([publisher, reader]);
+			expect(await fs.readFile(filePath, "utf8")).toMatch(/\n$/);
+		} finally {
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
 });
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
