@@ -480,13 +480,34 @@ describe("telemetry install ID", () => {
 				await fs.writeFile(claimPath, "expired|publishing\n", { flag: "a" });
 			return result as never;
 		});
+		const renewalTimer = setInterval(() => {
+			void fs.writeFile(claimPath, "expired|publishing\n", { flag: "a" });
+		}, 500);
 
 		try {
-			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+			const waiter = getTelemetryInstallId(filePath);
+			await Bun.sleep(1_200);
+			expect(await fs.stat(claimPath).catch(() => undefined)).toBeDefined();
+			clearInterval(renewalTimer);
+			await expect(waiter).rejects.toThrow("claim did not clear");
 			expect(await fs.readFile(claimPath, "utf8")).toContain("publishing");
 		} finally {
+			clearInterval(renewalTimer);
 			readSpy.mockRestore();
 		}
+	});
+
+	it("recovers a stale claim after a completed no-expiry heartbeat", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, "stale|publishing\n", { mode: 0o600 });
+		await fs.utimes(claimPath, new Date(Date.now() - 3_000), new Date(Date.now() - 3_000));
+
+		expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
 	});
 
 	it("keeps slow claim refreshes single-flight and does not retain exit", async () => {

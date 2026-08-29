@@ -434,7 +434,9 @@ async function reclaimStaleClaim(claimPath: string, stat: BigIntStats, claim: Cl
 	if (
 		finalClaim.token !== claim.token ||
 		finalClaim.state !== claim.state ||
-		(finalClaim.state === "publishing" && (finalClaim.expiresAt === undefined || finalClaim.expiresAt > Date.now()))
+		((finalClaim.state === "publishing" || finalClaim.state === "committed") &&
+			finalClaim.expiresAt !== undefined &&
+			finalClaim.expiresAt > Date.now())
 	)
 		return;
 	const current = await fs.lstat(claimPath, { bigint: true });
