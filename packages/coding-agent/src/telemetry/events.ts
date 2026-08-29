@@ -225,17 +225,14 @@ async function readClaimIdentity(claimPath: string): Promise<ClaimIdentity | und
 		const content = await fs.readFile(claimPath, "utf8");
 		const settled = await fs.lstat(claimPath, { bigint: true });
 		if (settled.dev !== stat.dev || settled.ino !== stat.ino) throw claimRaceError();
-		const [token, stateOrExpiry, expiryValue] = content.split("\n", 3);
-		const state = stateOrExpiry === "publishing" || stateOrExpiry === "committed" ? stateOrExpiry : undefined;
-		const expiry = state === undefined ? stateOrExpiry : expiryValue;
-		const expiresAt = expiry === undefined ? undefined : Number(expiry);
+		const parsed = parseClaim(content);
 		return {
 			dev: settled.dev,
 			ino: settled.ino,
 			mtimeMs: Number(settled.mtimeMs),
-			token,
-			state,
-			expiresAt: Number.isFinite(expiresAt) ? expiresAt : undefined,
+			token: parsed.token,
+			state: parsed.state,
+			expiresAt: parsed.expiresAt,
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") throw claimRaceError();
@@ -277,11 +274,10 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		const claim = parseClaim(content);
 		if (claim.token !== token || claim.state !== "publishing") return;
 		await handle.close();
-		handle = await fs.open(claimPath, "r+");
+		handle = await fs.open(claimPath, "a");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
-		await handle.truncate(0);
-		await handle.writeFile(`${token}\npublishing\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
+		await handle.writeFile(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS), "utf8");
 		await handle.sync();
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
@@ -313,12 +309,11 @@ async function transitionClaimCommitted(claimPath: string, token: string): Promi
 		if (parseClaim(content).token !== token || parseClaim(content).state !== "publishing")
 			throw new Error("telemetry install ID claim changed");
 		await handle.close();
-		handle = await fs.open(claimPath, "r+");
+		handle = await fs.open(claimPath, "a");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== before.dev || reopened.ino !== before.ino)
 			throw new Error("telemetry install ID claim changed");
-		await handle.truncate(0);
-		await handle.writeFile(`${token}\ncommitted\n`, "utf8");
+		await handle.writeFile(serializeClaim(token, "committed"), "utf8");
 		await handle.sync();
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
@@ -336,12 +331,25 @@ function claimLostError(): NodeJS.ErrnoException {
 	return error;
 }
 
-function parseClaim(content: string): { token: string; state: ClaimState } {
-	const [token, stateOrExpiry] = content.split("\n", 3);
-	return {
-		token,
-		state: stateOrExpiry === "publishing" || stateOrExpiry === "committed" ? stateOrExpiry : undefined,
-	};
+function parseClaim(content: string): { token: string; state: ClaimState; expiresAt: number | undefined } {
+	for (const line of content.trimEnd().split("\n").reverse()) {
+		const match = /^([^|\n]+)\|(publishing|committed)(?:\|(\d+))?$/.exec(line);
+		if (match)
+			return {
+				token: match[1],
+				state: match[2] as Exclude<ClaimState, undefined>,
+				expiresAt: match[3] === undefined ? undefined : Number(match[3]),
+			};
+	}
+	const [token, stateOrExpiry, expiryValue] = content.split("\n", 3);
+	const state = stateOrExpiry === "publishing" || stateOrExpiry === "committed" ? stateOrExpiry : undefined;
+	const expiry = state === undefined ? stateOrExpiry : expiryValue;
+	const expiresAt = expiry === undefined ? undefined : Number(expiry);
+	return { token, state, expiresAt: Number.isFinite(expiresAt) ? expiresAt : undefined };
+}
+
+function serializeClaim(token: string, state: Exclude<ClaimState, undefined>, expiresAt?: number): string {
+	return `${token}|${state}${expiresAt === undefined ? "" : `|${expiresAt}`}\n`;
 }
 
 async function waitForClaimRelease(claimPath: string): Promise<void> {
@@ -371,6 +379,18 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, claim: ClaimIdentity): Promise<void> {
 	if (!stat.isFile()) return;
 	if (claim.state === "publishing") await syncDirectory(path.dirname(claimPath));
+	const currentClaim = await readClaimIdentity(claimPath);
+	if (
+		currentClaim === undefined ||
+		currentClaim.dev !== claim.dev ||
+		currentClaim.ino !== claim.ino ||
+		currentClaim.token !== claim.token ||
+		currentClaim.state !== claim.state ||
+		currentClaim.expiresAt !== claim.expiresAt ||
+		(currentClaim.state === "publishing" &&
+			(currentClaim.expiresAt === undefined || currentClaim.expiresAt > Date.now()))
+	)
+		return;
 	const content = await fs.readFile(claimPath);
 	const current = await fs.lstat(claimPath, { bigint: true });
 	if (current.dev !== BigInt(stat.dev) || current.ino !== BigInt(stat.ino)) return;
@@ -433,7 +453,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			throw error;
 		}
 		try {
-			await claim.writeFile(`${token}\npublishing\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
+			await claim.writeFile(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS), "utf8");
 			await claim.sync();
 		} finally {
 			await claim.close();
@@ -447,7 +467,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			}
 			throw new Error(`telemetry install ID claim publication failed: ${claimPublication.reason}`);
 		}
-		ownsClaim = (await Bun.file(claimPath).text()).split("\n", 1)[0] === token;
+		ownsClaim = parseClaim(await Bun.file(claimPath).text()).token === token;
 		if (!ownsClaim) throw new Error("telemetry install ID claim changed");
 		leaseTimer = setInterval(
 			() => {
@@ -533,9 +553,14 @@ export async function getTelemetryInstallId(
 		}
 		if ((error as NodeJS.ErrnoException).code === "ECLAIM") {
 			await waitForClaimRelease(`${filePath}.lock`);
-			const existing = await readExistingInstallId(filePath);
-			await fs.chmod(filePath, 0o600);
-			return existing;
+			try {
+				const existing = await readExistingInstallId(filePath);
+				await fs.chmod(filePath, 0o600);
+				return existing;
+			} catch (retryError) {
+				if ((retryError as NodeJS.ErrnoException).code !== "ENOENT") throw retryError;
+				return await publishPortably(filePath, randomUUID());
+			}
 		}
 		throw error;
 	}
