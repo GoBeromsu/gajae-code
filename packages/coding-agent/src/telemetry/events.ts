@@ -46,6 +46,7 @@ const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const INSTALL_ID_CLAIM_TIMEOUT_MS = 2_000;
 const INSTALL_ID_CLAIM_LEASE_MS = 1_000;
 const INSTALL_ID_CLAIM_POLL_INITIAL_MS = 25;
+const durableInstallIdPaths = new Map<string, Promise<void>>();
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
 	if (value === null || typeof value !== "object") return false;
@@ -252,6 +253,13 @@ function claimRaceError(): NodeJS.ErrnoException {
 }
 
 async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: string): Promise<string> {
+	let durability = durableInstallIdPaths.get(filePath);
+	if (durability === undefined) {
+		durability = syncDirectory(path.dirname(filePath));
+		durableInstallIdPaths.set(filePath, durability);
+		durability.catch(() => durableInstallIdPaths.delete(filePath));
+	}
+	await durability;
 	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
 	while (true) {
 		const value = await readPublishedInstallId(filePath);
@@ -382,8 +390,10 @@ function serializeClaim(token: string, state: Exclude<ClaimState, undefined>, ex
 	return `${token}|${state}${expiresAt === undefined ? "" : `|${expiresAt}`}\n`;
 }
 
-async function waitForClaimRelease(claimPath: string): Promise<void> {
-	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
+async function waitForClaimRelease(
+	claimPath: string,
+	deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS,
+): Promise<void> {
 	while (Date.now() < deadline) {
 		try {
 			const stat = await fs.stat(claimPath, { bigint: true });
@@ -407,6 +417,25 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 			throw error;
 		}
 		await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
+	}
+	throw new Error("telemetry install ID claim did not clear");
+}
+
+async function convergeAfterClaim(filePath: string): Promise<string> {
+	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		await waitForClaimRelease(`${filePath}.lock`, deadline);
+		try {
+			return await readExistingInstallId(filePath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		try {
+			return await publishPortably(filePath, randomUUID());
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ECLAIM" && code !== "EEXIST") throw error;
+		}
 	}
 	throw new Error("telemetry install ID claim did not clear");
 }
@@ -636,15 +665,9 @@ export async function getTelemetryInstallId(
 			return existing;
 		}
 		if ((error as NodeJS.ErrnoException).code === "ECLAIM") {
-			await waitForClaimRelease(`${filePath}.lock`);
-			try {
-				const existing = await readExistingInstallId(filePath);
-				await fs.chmod(filePath, 0o600);
-				return existing;
-			} catch (retryError) {
-				if ((retryError as NodeJS.ErrnoException).code !== "ENOENT") throw retryError;
-				return await publishPortably(filePath, randomUUID());
-			}
+			const existing = await convergeAfterClaim(filePath);
+			await fs.chmod(filePath, 0o600);
+			return existing;
 		}
 		throw error;
 	}
