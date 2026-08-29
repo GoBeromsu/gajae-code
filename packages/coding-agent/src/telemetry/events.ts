@@ -573,7 +573,9 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		};
 		scheduleHeartbeat();
 		try {
-			return await readPublishedInstallId(filePath);
+			const existing = await readPublishedInstallId(filePath);
+			await syncDirectory(path.dirname(filePath));
+			return existing;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
@@ -582,7 +584,9 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			handle = await fs.open(temporaryPath, "wx", 0o600);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			return await readPublishedInstallId(filePath);
+			const existing = await readPublishedInstallId(filePath);
+			await syncDirectory(path.dirname(filePath));
+			return existing;
 		}
 		try {
 			await handle.writeFile(`${installId}\n`, "utf8");
@@ -602,7 +606,9 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		if (!publication.ok) {
 			if (publication.code !== "destination_exists")
 				throw new Error(`telemetry install ID publication failed: ${publication.reason}`);
-			return await readPublishedInstallId(filePath);
+			const existing = await readPublishedInstallId(filePath);
+			await syncDirectory(path.dirname(filePath));
+			return existing;
 		}
 		publishedFinal = true;
 		await assertClaimOwned(claimPath, token, "publishing");
