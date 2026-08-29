@@ -793,7 +793,11 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
  * This is the single source of truth for "active project root" used by install,
  * uninstall, list, upgrade, discovery, and doctor. Deterministic for a given `cwd`.
  */
-export async function resolveActiveProjectRegistryPath(cwd: string, homeDir?: string): Promise<string | null> {
+export async function resolveActiveProjectRegistryPath(
+	cwd: string,
+	homeDir?: string,
+	isolatedHome = false,
+): Promise<string | null> {
 	// Pass 1: walk up looking for an existing .gjc/ directory (nearest wins).
 	// Stop before the caller's authoritative home — its .gjc/ is the user-level
 	// config dir, not a project root. Explicit-home capability loading passes
@@ -806,11 +810,11 @@ export async function resolveActiveProjectRegistryPath(cwd: string, homeDir?: st
 		}
 	};
 	const explicitHome = homeDir !== undefined;
-	const trustedHome = await canonicalize(getTrustedHomeDir()).catch(() => null);
+	const trustedHome = isolatedHome ? null : await canonicalize(getTrustedHomeDir()).catch(() => null);
 	homeDir = await canonicalize(homeDir ?? getTrustedHomeDir());
 	const canonicalCwd = await canonicalize(cwd);
 	const relativeHome = path.relative(homeDir, canonicalCwd);
-	const explicitBoundary = explicitHome && homeDir !== trustedHome;
+	const explicitBoundary = isolatedHome || (explicitHome && homeDir !== trustedHome);
 	const effectiveStop =
 		!explicitBoundary ||
 		relativeHome === "" ||
@@ -890,8 +894,9 @@ const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: 
 export async function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
+	isolatedHome = false,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd, home) : null;
+	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd, home, isolatedHome) : null;
 	const cacheKey = `${home}:${resolvedProjectPath ?? ""}`;
 	const cached = pluginRootsCache.get(cacheKey);
 	if (cached) return cached;
