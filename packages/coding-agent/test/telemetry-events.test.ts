@@ -470,6 +470,63 @@ describe("telemetry install ID", () => {
 			readSpy.mockRestore();
 		}
 	});
+
+	it("keeps slow claim refreshes single-flight and does not retain exit", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		let releaseSync!: () => void;
+		let directorySyncStarted!: () => void;
+		const syncGate = new Promise<void>(resolve => {
+			releaseSync = resolve;
+		});
+		const syncStarted = new Promise<void>(resolve => {
+			directorySyncStarted = resolve;
+		});
+		let activeRefreshes = 0;
+		let maximumRefreshes = 0;
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (String(args[0]) === directory) {
+				const originalSync = handle.sync.bind(handle);
+				handle.sync = async () => {
+					directorySyncStarted();
+					await syncGate;
+					await originalSync();
+				};
+			}
+			if (String(args[0]) === claimPath && args[1] === "r+") {
+				const originalSync = handle.sync.bind(handle);
+				handle.sync = async () => {
+					activeRefreshes++;
+					maximumRefreshes = Math.max(maximumRefreshes, activeRefreshes);
+					await Bun.sleep(80);
+					await originalSync();
+					activeRefreshes--;
+				};
+			}
+			return handle;
+		});
+
+		try {
+			const publisher = getTelemetryInstallId(filePath);
+			while (!(await fs.stat(claimPath).catch(() => undefined))) await Bun.sleep(1);
+			await syncStarted;
+			await Bun.sleep(300);
+			expect(maximumRefreshes).toBeLessThanOrEqual(1);
+			releaseSync();
+			await publisher;
+		} finally {
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
 });
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

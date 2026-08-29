@@ -463,6 +463,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 	let committed = false;
 	let leaseTimer: NodeJS.Timeout | undefined;
 	let heartbeat = Promise.resolve();
+	let heartbeatStopped = false;
 	let claim: fs.FileHandle;
 	try {
 		try {
@@ -492,12 +493,18 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		}
 		ownsClaim = parseClaim(await Bun.file(claimPath).text()).token === token;
 		if (!ownsClaim) throw new Error("telemetry install ID claim changed");
-		leaseTimer = setInterval(
-			() => {
-				heartbeat = heartbeat.then(() => refreshClaimLease(claimPath, token));
-			},
-			Math.max(1, Math.floor(INSTALL_ID_CLAIM_LEASE_MS / 100)),
-		);
+		const scheduleHeartbeat = (): void => {
+			if (heartbeatStopped) return;
+			leaseTimer = setTimeout(
+				() => {
+					leaseTimer = undefined;
+					heartbeat = refreshClaimLease(claimPath, token).finally(scheduleHeartbeat);
+				},
+				Math.max(1, Math.floor(INSTALL_ID_CLAIM_LEASE_MS / 100)),
+			);
+			leaseTimer.unref();
+		};
+		scheduleHeartbeat();
 		try {
 			return await readPublishedInstallId(filePath);
 		} catch (error) {
@@ -526,13 +533,15 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		publishedFinal = true;
 		await assertClaimOwned(claimPath, token, "publishing");
 		await syncDirectory(path.dirname(filePath));
-		if (leaseTimer !== undefined) clearInterval(leaseTimer);
+		heartbeatStopped = true;
+		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
 		await heartbeat;
 		await transitionClaimCommitted(claimPath, token);
 		committed = true;
 		return installId;
 	} finally {
-		if (leaseTimer !== undefined) clearInterval(leaseTimer);
+		heartbeatStopped = true;
+		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
 		await fs.rm(claimTemporaryPath, { force: true }).catch(() => undefined);
 		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
 		if (ownsClaim && (!publishedFinal || committed)) await removeOwnedClaim(claimPath, token).catch(() => undefined);
