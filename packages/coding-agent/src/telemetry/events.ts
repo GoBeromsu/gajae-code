@@ -143,18 +143,23 @@ async function syncDirectory(directory: string): Promise<void> {
 	try {
 		handle = await fs.open(directory, "r");
 	} catch (error) {
-		if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") return;
+		if (isUnsupportedDirectorySync(error)) return;
 		throw error;
 	}
 	try {
 		try {
 			await handle.sync();
 		} catch (error) {
-			if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+			if (!isUnsupportedDirectorySync(error)) throw error;
 		}
 	} finally {
 		await handle.close();
 	}
+}
+
+function isUnsupportedDirectorySync(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException).code;
+	return process.platform === "win32" && (code === "EPERM" || code === "EACCES");
 }
 
 async function readPublishedInstallId(filePath: string): Promise<string> {
@@ -511,6 +516,12 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		} finally {
 			await handle.close();
 		}
+		heartbeatStopped = true;
+		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
+		await heartbeat;
+		await refreshClaimLease(claimPath, token);
+		heartbeatStopped = false;
+		scheduleHeartbeat();
 		await assertClaimOwned(claimPath, token, "publishing");
 		const publication = await renameNoReplacePathAsync(temporaryPath, filePath);
 		if (!publication.ok) {

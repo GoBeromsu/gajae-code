@@ -257,7 +257,10 @@ describe("telemetry install ID", () => {
 		}
 	});
 
-	it("treats a Windows EPERM directory sync as a supported durability limitation", async () => {
+	it.each([
+		"EPERM",
+		"EACCES",
+	] as const)("treats a Windows %s directory sync as a supported durability limitation", async code => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
@@ -266,7 +269,7 @@ describe("telemetry install ID", () => {
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			if (String(args[0]) === directory) {
 				const error = new Error("directory handles are unsupported") as NodeJS.ErrnoException;
-				error.code = "EPERM";
+				error.code = code;
 				throw error;
 			}
 			return originalOpen(...args);
@@ -494,6 +497,7 @@ describe("telemetry install ID", () => {
 		});
 		let activeRefreshes = 0;
 		let maximumRefreshes = 0;
+		let refreshes = 0;
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			const handle = await realOpen(...args);
 			if (String(args[0]) === directory) {
@@ -504,9 +508,10 @@ describe("telemetry install ID", () => {
 					await originalSync();
 				};
 			}
-			if (String(args[0]) === claimPath && args[1] === "r+") {
+			if (String(args[0]) === claimPath && args[1] === "a") {
 				const originalSync = handle.sync.bind(handle);
 				handle.sync = async () => {
+					refreshes++;
 					activeRefreshes++;
 					maximumRefreshes = Math.max(maximumRefreshes, activeRefreshes);
 					await Bun.sleep(80);
@@ -523,6 +528,7 @@ describe("telemetry install ID", () => {
 			await syncStarted;
 			await Bun.sleep(300);
 			expect(maximumRefreshes).toBeLessThanOrEqual(1);
+			expect(refreshes).toBeGreaterThan(0);
 			releaseSync();
 			await publisher;
 		} finally {
@@ -546,11 +552,13 @@ describe("telemetry install ID", () => {
 			releaseRefresh = resolve;
 		});
 		let temporaryOpens = 0;
+		let refreshes = 0;
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			const handle = await realOpen(...args);
-			if (String(args[0]) === claimPath && args[1] === "r+") {
+			if (String(args[0]) === claimPath && args[1] === "a") {
 				const originalSync = handle.sync.bind(handle);
 				handle.sync = async () => {
+					refreshes++;
 					await refreshGate;
 					await originalSync();
 				};
@@ -579,6 +587,7 @@ describe("telemetry install ID", () => {
 			releaseRefresh();
 			const failure = await publisher;
 			expect(failure).toMatchObject({ code: "EIO" });
+			expect(refreshes).toBeGreaterThan(0);
 			expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
 		} finally {
 			releaseRefresh();
