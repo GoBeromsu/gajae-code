@@ -408,6 +408,13 @@ async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, c
 	)
 		return;
 	const content = await fs.readFile(claimPath);
+	const finalClaim = parseClaim(content.toString("utf8"));
+	if (
+		finalClaim.token !== claim.token ||
+		finalClaim.state !== claim.state ||
+		(finalClaim.state === "publishing" && (finalClaim.expiresAt === undefined || finalClaim.expiresAt > Date.now()))
+	)
+		return;
 	const current = await fs.lstat(claimPath, { bigint: true });
 	if (current.dev !== BigInt(stat.dev) || current.ino !== BigInt(stat.ino)) return;
 	const result = exactUnlinkDirect(claimPath, {

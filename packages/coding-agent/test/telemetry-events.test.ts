@@ -446,6 +446,30 @@ describe("telemetry install ID", () => {
 			readSpy.mockRestore();
 		}
 	});
+
+	it("does not reclaim a claim renewed during stale recovery", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, `expired|publishing|${Date.now() - 1}\n`, { mode: 0o600 });
+		const originalReadFile = fs.readFile.bind(fs);
+		let claimReads = 0;
+		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
+			const result = await originalReadFile(file, options as never);
+			if (String(file) === claimPath && ++claimReads === 4)
+				await fs.writeFile(claimPath, `expired|publishing|${Date.now() + 10_000}\n`, { flag: "a" });
+			return result as never;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+			expect(await fs.readFile(claimPath, "utf8")).toContain("publishing");
+		} finally {
+			readSpy.mockRestore();
+		}
+	});
 });
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
