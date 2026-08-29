@@ -6,6 +6,7 @@ import { getTelemetryInstallId, serializeTelemetryEvent } from "../src/telemetry
 
 const tempDirs: string[] = [];
 const realOpen = fs.open;
+const realLstat = fs.lstat;
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
@@ -372,6 +373,79 @@ describe("telemetry install ID", () => {
 
 		expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
 		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
+	});
+
+	it("retries when a claim disappears between read and identity lstat", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, "committed\ncommitted\n", { mode: 0o600 });
+		let claimLstatCalls = 0;
+		const lstatSpy = spyOn(fs, "lstat").mockImplementation(async (file, options) => {
+			if (String(file) === claimPath && ++claimLstatCalls === 2) {
+				await fs.rm(claimPath);
+				const error = new Error("claim disappeared") as NodeJS.ErrnoException;
+				error.code = "ENOENT";
+				throw error;
+			}
+			return (await realLstat(file, options as never)) as never;
+		});
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+		} finally {
+			lstatSpy.mockRestore();
+		}
+	});
+
+	it("fails closed when a claim is replaced between identity lstat and read", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, "committed\ncommitted\n", { mode: 0o600 });
+		const originalReadFile = fs.readFile.bind(fs);
+		let replaced = false;
+		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
+			const result = await originalReadFile(file, options as never);
+			if (!replaced && String(file) === claimPath) {
+				replaced = true;
+				await fs.rm(claimPath);
+				await fs.writeFile(claimPath, "replacement-claim", { mode: 0o600 });
+			}
+			return result as never;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+			expect(await fs.readFile(claimPath, "utf8")).toBe("replacement-claim");
+		} finally {
+			readSpy.mockRestore();
+		}
+	});
+
+	it("accepts a UUID only after a publisher releases its claim", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, "committed\ncommitted\n", { mode: 0o600 });
+		const originalReadFile = fs.readFile.bind(fs);
+		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
+			const result = await originalReadFile(file, options as never);
+			if (String(file) === filePath) await fs.rm(claimPath);
+			return result as never;
+		});
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+		} finally {
+			readSpy.mockRestore();
+		}
 	});
 });
 
