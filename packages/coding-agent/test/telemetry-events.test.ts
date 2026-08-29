@@ -9,6 +9,7 @@ const tempDirs: string[] = [];
 const realOpen = fs.open;
 const realLstat = fs.lstat;
 const realStat = fs.stat.bind(fs);
+const realBunFile = Bun.file;
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
@@ -439,17 +440,28 @@ describe("telemetry install ID", () => {
 		const claimPath = `${filePath}.lock`;
 		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
 		await fs.writeFile(claimPath, "committed\ncommitted\n", { mode: 0o600 });
-		const originalReadFile = fs.readFile.bind(fs);
-		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
-			const result = await originalReadFile(file, options as never);
-			if (String(file) === filePath) await fs.rm(claimPath);
-			return result as never;
+		let raceFired = false;
+		const fileSpy = spyOn(Bun, "file").mockImplementation(file => {
+			const target = realBunFile(file as string);
+			if (String(file) !== filePath) return target;
+			return new Proxy(target, {
+				get(object, property, receiver) {
+					if (property !== "text") return Reflect.get(object, property, receiver);
+					return async () => {
+						const result = await object.text();
+						await fs.rm(claimPath, { force: true });
+						raceFired = true;
+						return result;
+					};
+				},
+			});
 		});
 
 		try {
 			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
 		} finally {
-			readSpy.mockRestore();
+			expect(raceFired).toBe(true);
+			fileSpy.mockRestore();
 		}
 	});
 
@@ -498,6 +510,7 @@ describe("telemetry install ID", () => {
 		let activeRefreshes = 0;
 		let maximumRefreshes = 0;
 		let refreshes = 0;
+		let claimOpens = 0;
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			const handle = await realOpen(...args);
 			if (String(args[0]) === directory) {
@@ -508,7 +521,7 @@ describe("telemetry install ID", () => {
 					await originalSync();
 				};
 			}
-			if (String(args[0]) === claimPath && args[1] === "a") {
+			if (String(args[0]) === claimPath && args[1] === "r+" && ++claimOpens % 2 === 0) {
 				const originalSync = handle.sync.bind(handle);
 				handle.sync = async () => {
 					refreshes++;
@@ -553,9 +566,10 @@ describe("telemetry install ID", () => {
 		});
 		let temporaryOpens = 0;
 		let refreshes = 0;
+		let claimOpens = 0;
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			const handle = await realOpen(...args);
-			if (String(args[0]) === claimPath && args[1] === "a") {
+			if (String(args[0]) === claimPath && args[1] === "r+" && ++claimOpens % 2 === 0) {
 				const originalSync = handle.sync.bind(handle);
 				handle.sync = async () => {
 					refreshes++;

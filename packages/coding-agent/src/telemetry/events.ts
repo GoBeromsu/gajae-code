@@ -280,10 +280,11 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		const claim = parseClaim(content);
 		if (claim.token !== token || claim.state !== "publishing") return;
 		await handle.close();
-		handle = await fs.open(claimPath, "a");
+		handle = await fs.open(claimPath, "r+");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
-		await handle.writeFile(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS), "utf8");
+		const record = Buffer.from(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
+		await handle.write(record, 0, record.byteLength, Number(reopened.size));
 		await handle.sync();
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
@@ -315,11 +316,12 @@ async function transitionClaimCommitted(claimPath: string, token: string): Promi
 		if (parseClaim(content).token !== token || parseClaim(content).state !== "publishing")
 			throw new Error("telemetry install ID claim changed");
 		await handle.close();
-		handle = await fs.open(claimPath, "a");
+		handle = await fs.open(claimPath, "r+");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== before.dev || reopened.ino !== before.ino)
 			throw new Error("telemetry install ID claim changed");
-		await handle.writeFile(serializeClaim(token, "committed"), "utf8");
+		const record = Buffer.from(serializeClaim(token, "committed"));
+		await handle.write(record, 0, record.byteLength, Number(reopened.size));
 		await handle.sync();
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
