@@ -2770,13 +2770,16 @@ export class AgentSession {
 		// This mirrors exactly what the sdk delivery seam does for a live receipt
 		// delivery, so the parked path cannot rely on an unrelated idle rearm.
 		deliverParked: (job, disposition) => {
-			const endpointId = this.#ownedAsyncJobManager
-				? AsyncJobManager.endpointIdOf(this.#ownedAsyncJobManager)
-				: undefined;
+			// Subagents inherit their parent's manager, so resolve both the manager
+			// and endpoint through the session's effective manager. Looking up an
+			// inherited completion without its endpoint silently demotes it to an
+			// ordinary delivery (or can select a sibling session's tuple).
+			const manager = this.#ownedAsyncJobManager ?? AsyncJobManager.instance();
+			const endpointId = manager ? AsyncJobManager.endpointIdOf(manager) : undefined;
 			const registration = lookupOwnedRegistration(job.id, job.generation, endpointId);
-			if (this.#ownedAsyncJobManager?.isDeliverySuppressed(job.id, job.generation)) {
+			if (manager?.isDeliverySuppressed(job.id, job.generation)) {
 				if (registration) unregisterOwnedRegistration(registration);
-				this.#ownedAsyncJobManager.clearParkedDelivery(job.generation);
+				manager.clearParkedDelivery(job.generation);
 				return;
 			}
 			if (this.#foldCoordinator.claimCompletionNotice(job)) {
@@ -2796,7 +2799,6 @@ export class AgentSession {
 			const allowArtifact = ownedCompletion === undefined || isOwnedCompletionEnvelopeAllowed(ownedCompletion);
 			void formatParkedAsyncResult(this.sessionManager, disposition.text, allowArtifact)
 				.then(formattedResult => {
-					const manager = this.#ownedAsyncJobManager;
 					if (
 						manager?.isDeliverySuppressed(job.id, job.generation) ||
 						this.#isDisposed ||
@@ -2832,7 +2834,7 @@ export class AgentSession {
 					}
 				})
 				.catch(error => {
-					this.#ownedAsyncJobManager?.clearParkedDelivery(job.generation);
+					manager?.clearParkedDelivery(job.generation);
 					logger.warn("Parked folded delivery formatting failed", { error: String(error) });
 				});
 		},
@@ -3228,6 +3230,23 @@ export class AgentSession {
 	}
 
 	/**
+	 * Reject prompt/selection/continuation admission while a session identity
+	 * transition is rewriting the live session. Handoff keeps its historical
+	 * error because callers use it to distinguish that explicit operation from
+	 * the other transition fences.
+	 */
+	#assertNoSessionTransitionAdmission(): void {
+		if (this.#handoffTransitionActive) {
+			this.#assertNoHandoffTransition();
+		}
+		if (this.#sessionTransitionKind !== undefined) {
+			throw Object.assign(new AgentBusyError("Cannot start a turn while a session transition is in progress."), {
+				code: "busy",
+			});
+		}
+	}
+
+	/**
 	 * Single, synchronously-acquired mutex for session-identity transitions
 	 * (handoff, compact, new/switch/branch/clear, fork, tree navigation). Acquired
 	 * BEFORE any await at each transition's entry and released in its finally, so
@@ -3330,16 +3349,16 @@ export class AgentSession {
 			((this.#sessionAdmissionClosing || this.#isDisposed) && options?.allowDuringClosing !== true)
 		)
 			throw this.#sessionAdmissionBusyError();
+		// Identity transitions hold the session mutex from their synchronous entry
+		// through commit/rollback. Do not admit a new prompt or selection after a
+		// transition has begun; handoff retains its operation-specific diagnostic.
+		this.#assertNoSessionTransitionAdmission();
 		// Reject new external turns for the whole handoff transition. The handoff
 		// itself never acquires prompt admission (it generates via generateHandoff and
 		// injects via appendCustomMessageEntry), so this fences external entrants —
 		// prompt/sendUserMessage/steer/follow-up/triggerTurn all funnel here — without
 		// blocking the handoff's own work or the exempt auto-maintenance owner.
-		if (kind === "prompt" && this.#handoffTransitionActive) {
-			throw Object.assign(new AgentBusyError("Cannot start a turn while a handoff is in progress."), {
-				code: "busy",
-			});
-		}
+		if (kind === "prompt" && this.#handoffTransitionActive) this.#assertNoHandoffTransition();
 
 		const entry: SessionAdmissionEntry = {
 			kind,
@@ -8807,6 +8826,13 @@ export class AgentSession {
 		this.#suppressOwnAsyncJobDeliveries();
 		this.#cancelOwnAsyncJobs();
 		this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainMessages(true));
+		// A direct dispose has no later delivery boundary for registrations that
+		// belong to this session's owned manager (including still-running jobs).
+		// Retire them before unregistering/disconnecting that manager; inherited
+		// managers are shared with a parent and must not be swept by endpoint.
+		if (this.#ownedAsyncJobManager) {
+			retireOwnedRegistrationsForEndpoint(this.#ownedRegistrationEndpoint());
+		}
 		this.yieldQueue.clear();
 		await Promise.allSettled(this.#deferredOwnerShutdownFinalizations);
 		const ownedAsyncManager = this.#ownedAsyncJobManager;
@@ -11430,6 +11456,11 @@ export class AgentSession {
 				: this.#promptPreflightAbortController.signal;
 			waitedForAbortUnwind = true;
 		}
+		// A transition may have started while selection/abort preflight was
+		// settling. Check immediately before either queuing a streaming prompt or
+		// entering the prompt admission boundary so it cannot target rewritten
+		// predecessor state.
+		this.#assertNoSessionTransitionAdmission();
 		const deepInterviewUserIntentEpoch =
 			claimsGenuineUserIntent && !this.isStreaming ? this.#claimDeepInterviewUserIntent() : undefined;
 
@@ -11745,13 +11776,13 @@ export class AgentSession {
 			resetRetryReplaySafety?: boolean;
 		},
 	): Promise<void> {
-		this.#assertNoHandoffTransition();
+		this.#assertNoSessionTransitionAdmission();
 		if (options?.preflightSignal?.aborted) throw promptPreflightCancelledError();
 		await awaitPromptInvocationPreflight(this.#agentEndPublicationPromise, options?.preflightSignal);
 		// Re-check after the publication await: a handoff can engage during that
 		// window, and #beginInFlight below would otherwise start a turn against the
 		// session being handed off.
-		this.#assertNoHandoffTransition();
+		this.#assertNoSessionTransitionAdmission();
 		const inFlightPrompt = this.#beginInFlight();
 		// Discard hidden next-turn successors queued by a PREVIOUS turn that a
 		// terminal abort closed. This must run BEFORE the admission bump below:
@@ -15682,6 +15713,7 @@ export class AgentSession {
 		if (this.#sessionAdmissionClosing || this.#sessionAdmissionClosed || this.#isDisposed) {
 			throw this.#sessionAdmissionBusyError();
 		}
+		this.#assertNoSessionTransitionAdmission();
 		if (thinkingLevel === ThinkingLevel.Inherit) {
 			throw new Error("Default model selection cannot inherit a thinking level");
 		}
@@ -17293,6 +17325,10 @@ export class AgentSession {
 				this.#rekeyHindsightMemoryForCurrentSessionId();
 				this.#steeringMessages = [];
 				this.#followUpMessages = [];
+				// The successor is committed and predecessor-owned async jobs have
+				// settled; retire any hidden owned-completion registrations before
+				// dropping the predecessor's hidden queue.
+				this.#settleDeliveredOwnedRegistrations(this.#pendingNextTurnMessages.map(entry => entry.message));
 				this.#pendingNextTurnMessages = [];
 				this.#scheduledHiddenNextTurnGeneration = undefined;
 				this.#todoReminderCount = 0;
@@ -22635,6 +22671,11 @@ export class AgentSession {
 				}
 				if (didReloadConversationChange && !switchingToDifferentSession) this.#quarantineQueuedAsyncResults();
 				this.#reconnectToAgent();
+				// The restored session is now live and all fallible switch work has
+				// completed. Retire terminal owned registrations from the predecessor's
+				// hidden queue before its destructive clear is finalized. Keep the
+				// snapshot for rollback until this commit point.
+				this.#settleDeliveredOwnedRegistrations(previousPendingNextTurnMessages.map(entry => entry.message));
 				// Fence predecessor continuations before session_switch starts SDK runtime
 				// teardown. The previous runtime waits for those continuations to settle;
 				// waiting to transfer authority until after hooks creates a circular wait.
@@ -22830,6 +22871,10 @@ export class AgentSession {
 			} catch (error) {
 				throw await discardPreparedNewSessionAfterFailure(this.sessionManager, prepared, error);
 			}
+			// The successor is committed and predecessor-owned async jobs have
+			// settled; retire hidden owned-completion registrations before dropping
+			// the predecessor's hidden queue.
+			this.#settleDeliveredOwnedRegistrations(this.#pendingNextTurnMessages.map(entry => entry.message));
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#terminalizeQueuedSdkWorkForSessionTransition([
