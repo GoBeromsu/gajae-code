@@ -172,13 +172,13 @@ async function readPublishedInstallId(filePath: string): Promise<string> {
 }
 
 async function readExistingInstallId(filePath: string): Promise<string> {
-	const deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
+	const deadline = performance.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
 	while (true) {
 		try {
 			return await readExistingInstallIdSnapshot(filePath);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ECLAIMRACE") throw error;
-			if (Date.now() >= deadline) throw new Error("telemetry install ID claim did not clear");
+			if (performance.now() >= deadline) throw new Error("telemetry install ID claim did not clear");
 			await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
 		}
 	}
@@ -262,7 +262,7 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 		durability.catch(() => durableInstallIdPaths.delete(filePath));
 	}
 	await durability;
-	const deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
+	const deadline = performance.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
 	while (true) {
 		const value = await readPublishedInstallId(filePath);
 		try {
@@ -273,7 +273,7 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 			return value;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ECLAIMRACE") throw error;
-			if (Date.now() >= deadline) throw new Error("telemetry install ID claim did not clear");
+			if (performance.now() >= deadline) throw new Error("telemetry install ID claim did not clear");
 		}
 	}
 }
@@ -394,9 +394,9 @@ function serializeClaim(token: string, state: Exclude<ClaimState, undefined>, ex
 
 async function waitForClaimRelease(
 	claimPath: string,
-	deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS,
+	deadline = performance.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS,
 ): Promise<void> {
-	while (Date.now() < deadline) {
+	while (performance.now() < deadline) {
 		try {
 			const stat = await fs.stat(claimPath, { bigint: true });
 			const claim = await readClaimIdentity(claimPath);
@@ -424,8 +424,8 @@ async function waitForClaimRelease(
 }
 
 async function convergeAfterClaim(filePath: string): Promise<string> {
-	const deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
-	while (Date.now() < deadline) {
+	const deadline = performance.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
+	while (performance.now() < deadline) {
 		await waitForClaimRelease(`${filePath}.lock`, deadline);
 		try {
 			return await readExistingInstallId(filePath);
