@@ -200,7 +200,7 @@ async function readExistingInstallIdSnapshot(filePath: string): Promise<string> 
 	const claimBefore = await readClaimIdentity(claimPath);
 	let fileMissing = false;
 	try {
-		const existing = await readPublishedInstallId(filePath);
+		await readPublishedInstallId(filePath);
 		const claimAfter = await readClaimIdentity(claimPath);
 		if (claimBefore === undefined && claimAfter === undefined)
 			return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
