@@ -1024,7 +1024,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		const terminalize = (error: unknown): void => {
 			transportTerminalized = true;
 			terminalDrainMode = true;
-			terminalPendingError = error;
+			if (callerAbortError) terminalPendingError = callerAbortError;
+			else if (terminalPendingError === undefined) terminalPendingError = error;
 			for (const close of shellGates) close();
 			shellGates.clear();
 			activeExecAbort?.(error instanceof Error ? error : new Error(String(error)));
@@ -1471,7 +1472,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					pendingBuffer.consume(5 + msgLen);
 					bufferedObservationOffset = 0;
 					bufferedObservationTurnEnded = false;
-					if (terminalAdmissionMode === "closed" && !(flags & CONNECT_END_STREAM_FLAG)) continue;
+					if (terminalAdmissionMode === "closed" && !(flags & CONNECT_END_STREAM_FLAG) && !terminalDrainMode) continue;
 
 					if (flags & CONNECT_END_STREAM_FLAG) {
 						closeTerminalAdmission();
