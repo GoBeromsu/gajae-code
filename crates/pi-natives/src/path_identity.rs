@@ -1243,6 +1243,16 @@ pub fn exact_unlink_direct(
 	};
 	platform::exact_unlink_direct(Path::new(&path), &identity)
 }
+
+/// Run direct exact unlink on the libuv blocking pool so a slow cleanup cannot
+/// stall JavaScript timers or process lifecycle progress.
+#[napi]
+pub fn exact_unlink_direct_async(
+	path: String,
+	identity: NativeExactFileIdentity,
+) -> task::Promise<NativeExactUnlinkResult> {
+	task::blocking("exact_unlink_direct", (), move |_| Ok(exact_unlink_direct(path, identity)))
+}
 /// Atomically replace a staged regular file only after validating the exact
 /// staged source and expected destination.
 ///

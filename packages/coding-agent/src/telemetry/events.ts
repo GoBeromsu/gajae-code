@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { exactUnlinkDirect, renameNoReplacePathAsync } from "@gajae-code/natives";
+import { exactUnlinkDirectAsync, renameNoReplacePathAsync } from "@gajae-code/natives";
 import { getTrustedAgentFile } from "@gajae-code/utils";
 
 export const TELEMETRY_SCHEMA_VERSION = 1 as const;
@@ -479,7 +479,7 @@ async function reclaimStaleClaim(claimPath: string, stat: BigIntStats, claim: Cl
 	)
 		return;
 	if (current.dev !== stat.dev || current.ino !== stat.ino) return;
-	const result = exactUnlinkDirect(claimPath, {
+	const result = await exactUnlinkDirectAsync(claimPath, {
 		dev: current.dev,
 		ino: current.ino,
 		nlink: current.nlink,
@@ -499,7 +499,7 @@ async function removeOwnedClaim(claimPath: string, token: string): Promise<void>
 		if (parseClaim(content).token !== token) return;
 		const current = await fs.lstat(claimPath, { bigint: true });
 		if (current.dev !== stat.dev || current.ino !== stat.ino) return;
-		const result = exactUnlinkDirect(claimPath, {
+		const result = await exactUnlinkDirectAsync(claimPath, {
 			dev: stat.dev,
 			ino: stat.ino,
 			nlink: stat.nlink,
