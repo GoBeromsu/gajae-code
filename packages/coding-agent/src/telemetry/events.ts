@@ -437,7 +437,12 @@ async function waitForClaimRelease(
 				claim?.state === "committed" &&
 				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now()) ||
 					(claim.expiresAt === undefined && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS));
-			if (publishingExpired || committedStale) {
+			const malformedStale =
+				claim !== undefined &&
+				claim.state === undefined &&
+				stat.size === 0n &&
+				Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_TIMEOUT_MS;
+			if (claim !== undefined && (publishingExpired || committedStale || malformedStale)) {
 				await reclaimStaleClaim(claimPath, stat, claim);
 				continue;
 			}

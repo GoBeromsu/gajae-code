@@ -568,6 +568,18 @@ describe("telemetry install ID", () => {
 		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
 	});
 
+	it("recovers an abandoned empty direct claim", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(claimPath, "", { mode: 0o600 });
+		await fs.utimes(claimPath, new Date(Date.now() - 3_000), new Date(Date.now() - 3_000));
+
+		expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
+		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
+	});
+
 	it("waits for a changing legacy destination to complete", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
