@@ -115,7 +115,16 @@ async function publishNewInstallId(filePath: string, installId: string): Promise
 		} finally {
 			await handle.close();
 		}
-		await fs.link(tempPath, filePath);
+		try {
+			await fs.link(tempPath, filePath);
+		} catch (error) {
+			if (isHardLinkUnsupported(error)) {
+				const unsupported = new Error("exclusive hard links are unavailable") as NodeJS.ErrnoException;
+				unsupported.code = "EUNSUPPORTED";
+				throw unsupported;
+			}
+			throw error;
+		}
 		await syncDirectory(path.dirname(filePath));
 	} finally {
 		await fs.rm(tempPath, { force: true }).catch(() => undefined);
@@ -140,6 +149,32 @@ async function readPublishedInstallId(filePath: string): Promise<string> {
 	const existing = (await Bun.file(filePath).text()).trim();
 	if (!UUID_V4.test(existing)) throw new Error("telemetry install ID is malformed");
 	return existing;
+}
+
+async function readExistingInstallId(filePath: string): Promise<string> {
+	const claimPath = `${filePath}.lock`;
+	try {
+		const existing = (await Bun.file(filePath).text()).trim();
+		if (UUID_V4.test(existing)) return existing;
+		try {
+			await fs.access(claimPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("telemetry install ID is malformed");
+			throw error;
+		}
+		await waitForClaimRelease(claimPath);
+		return await readPublishedInstallId(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		try {
+			await fs.access(claimPath);
+		} catch (claimError) {
+			if ((claimError as NodeJS.ErrnoException).code === "ENOENT") throw error;
+			throw claimError;
+		}
+		await waitForClaimRelease(claimPath);
+		return await readPublishedInstallId(filePath);
+	}
 }
 
 async function waitForClaimRelease(claimPath: string): Promise<void> {
@@ -209,7 +244,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		await syncDirectory(path.dirname(filePath));
 		return installId;
 	} finally {
-		if (ownsClaim) await removeOwnedClaim(claimPath, token);
+		if (ownsClaim) await removeOwnedClaim(claimPath, token).catch(() => undefined);
 	}
 }
 
@@ -218,7 +253,7 @@ async function publishPortably(filePath: string, installId: string): Promise<str
 		await publishNewInstallId(filePath, installId);
 		return installId;
 	} catch (error) {
-		if (!isHardLinkUnsupported(error)) throw error;
+		if ((error as NodeJS.ErrnoException).code !== "EUNSUPPORTED") throw error;
 		return publishWithClaim(filePath, installId);
 	}
 }
@@ -228,7 +263,7 @@ export async function getTelemetryInstallId(
 	filePath = getTrustedAgentFile(TELEMETRY_INSTALL_ID_FILE),
 ): Promise<string> {
 	try {
-		const existing = (await Bun.file(filePath).text()).trim();
+		const existing = await readExistingInstallId(filePath);
 		if (UUID_V4.test(existing)) {
 			await fs.chmod(filePath, 0o600);
 			return existing;
@@ -244,20 +279,13 @@ export async function getTelemetryInstallId(
 		return await publishPortably(filePath, generated);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-			const existing = await readPublishedInstallId(filePath);
+			const existing = await readExistingInstallId(filePath);
 			await fs.chmod(filePath, 0o600);
 			return existing;
 		}
 		if ((error as NodeJS.ErrnoException).code === "ECLAIM") {
 			await waitForClaimRelease(`${filePath}.lock`);
-			const existing = await readPublishedInstallId(filePath);
-			await fs.chmod(filePath, 0o600);
-			return existing;
-		}
-		if (isHardLinkUnsupported(error)) {
-			const claimPath = `${filePath}.lock`;
-			await waitForClaimRelease(claimPath);
-			const existing = await readPublishedInstallId(filePath);
+			const existing = await readExistingInstallId(filePath);
 			await fs.chmod(filePath, 0o600);
 			return existing;
 		}
