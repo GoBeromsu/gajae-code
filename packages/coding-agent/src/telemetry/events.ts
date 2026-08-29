@@ -295,7 +295,7 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		const record = Buffer.from(serializeClaim(token, claim.state));
 		await writeClaimRecord(handle, record, Number(reopened.size));
 		await handle.sync();
-		await fs.utimes(claimPath, new Date(), new Date());
+		await handle.utimes(new Date(), new Date());
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw error;
