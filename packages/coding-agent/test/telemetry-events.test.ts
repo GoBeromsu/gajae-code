@@ -137,6 +137,20 @@ describe("telemetry install ID", () => {
 		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
 	});
 
+	it("converges three concurrent callers on one published winner", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+
+		const ids = await Promise.all([
+			getTelemetryInstallId(filePath),
+			getTelemetryInstallId(filePath),
+			getTelemetryInstallId(filePath),
+		]);
+		expect(ids[0]).toBe(ids[1]);
+		expect(ids[1]).toBe(ids[2]);
+	});
+
 	it("syncs the containing directory after publishing", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
