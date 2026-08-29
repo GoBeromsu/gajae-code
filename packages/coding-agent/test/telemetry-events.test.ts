@@ -595,6 +595,7 @@ describe("telemetry install ID", () => {
 			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
 			await fs.rm(filePath);
 			await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174001\n", { mode: 0o600 });
+			await fs.utimes(filePath, new Date(Date.now() + 2_000), new Date(Date.now() + 2_000));
 			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174001");
 			expect(directoryOpens).toBe(2);
 		} finally {
