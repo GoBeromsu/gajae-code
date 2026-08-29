@@ -477,7 +477,7 @@ describe("telemetry install ID", () => {
 		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
 			const result = await originalReadFile(file, options as never);
 			if (String(file) === claimPath && ++claimReads === 4)
-				await fs.writeFile(claimPath, `expired|publishing|${Date.now() + 10_000}\n`, { flag: "a" });
+				await fs.writeFile(claimPath, "expired|publishing\n", { flag: "a" });
 			return result as never;
 		});
 

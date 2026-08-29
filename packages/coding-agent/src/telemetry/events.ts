@@ -423,8 +423,10 @@ async function reclaimStaleClaim(claimPath: string, stat: BigIntStats, claim: Cl
 		currentClaim.token !== claim.token ||
 		currentClaim.state !== claim.state ||
 		currentClaim.expiresAt !== claim.expiresAt ||
-		(currentClaim.state === "publishing" &&
-			(currentClaim.expiresAt === undefined || currentClaim.expiresAt > Date.now()))
+		((currentClaim.state === "publishing" || currentClaim.state === "committed") &&
+			(currentClaim.expiresAt === undefined
+				? Date.now() - currentClaim.mtimeMs <= INSTALL_ID_CLAIM_TIMEOUT_MS
+				: currentClaim.expiresAt > Date.now()))
 	)
 		return;
 	const content = await fs.readFile(claimPath);
@@ -436,6 +438,14 @@ async function reclaimStaleClaim(claimPath: string, stat: BigIntStats, claim: Cl
 	)
 		return;
 	const current = await fs.lstat(claimPath, { bigint: true });
+	const currentMtimeMs = Number(current.mtimeMs);
+	if (
+		(finalClaim.state === "publishing" || finalClaim.state === "committed") &&
+		(finalClaim.expiresAt === undefined
+			? Date.now() - currentMtimeMs <= INSTALL_ID_CLAIM_TIMEOUT_MS
+			: finalClaim.expiresAt > Date.now())
+	)
+		return;
 	if (current.dev !== stat.dev || current.ino !== stat.ino) return;
 	const result = exactUnlinkDirect(claimPath, {
 		dev: current.dev,
