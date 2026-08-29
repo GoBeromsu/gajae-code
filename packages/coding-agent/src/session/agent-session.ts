@@ -8679,32 +8679,58 @@ export class AgentSession {
 	 * The predecessor mapping remains in place until the synchronous commit/rekey
 	 * boundary, so a concurrent session cannot claim the successor after an
 	 * admission check and before owner-job settlement. A reservation that installed
-	 * a new mapping is released only on a pre-commit failure.
+	 * a new mapping is released on a pre-commit failure, or finalized after commit;
+	 * finalization preserves a top-level rekey and removes a child-only alias.
 	 */
 	#reserveJobManagerEndpoint(
 		successorSessionId: string,
 		successorSessionFile: string | undefined,
-	): { endpointId: string; release: () => void } | undefined {
+		options: { predecessorSessionId?: string; predecessorSessionFile?: string } = {},
+	): { endpointId: string; release: () => void; finalize: () => void } | undefined {
 		const endpointId = this.#asyncJobEndpointId(successorSessionId, successorSessionFile);
 		const ownManager = this.#ownedAsyncJobManager ?? AsyncJobManager.instance();
 		if (!ownManager) return undefined;
 		this.#assertJobManagerEndpointAdmission(successorSessionId, successorSessionFile);
 		if (AsyncJobManager.forEndpoint(endpointId) === ownManager) {
-			return { endpointId, release: () => {} };
+			return { endpointId, release: () => {}, finalize: () => {} };
 		}
+		const predecessorEndpointId =
+			options.predecessorSessionId !== undefined
+				? this.#asyncJobEndpointId(options.predecessorSessionId, options.predecessorSessionFile)
+				: undefined;
+		const predecessorWasRegistered =
+			predecessorEndpointId !== undefined && AsyncJobManager.forEndpoint(predecessorEndpointId) === ownManager;
+		const isBorrowedManager =
+			!this.#disposeAsyncJobManager || this.taskDepth > 0 || this.#workflowGatePublication === "local";
 		if (!AsyncJobManager.registerForEndpoint(endpointId, ownManager)) {
 			throw new Error(
 				`Session identity transition rejected: endpoint "${endpointId}" is owned by another live session's job manager.`,
 			);
 		}
 		let released = false;
+		let finalized = false;
 		return {
 			endpointId,
 			release: () => {
-				if (released) return;
+				if (released || finalized) return;
 				released = true;
 				if (AsyncJobManager.forEndpoint(endpointId) === ownManager)
 					AsyncJobManager.unregisterForEndpoint(endpointId);
+			},
+			finalize: () => {
+				if (released || finalized) return;
+				finalized = true;
+				// Top-level transitions rekey their predecessor mapping onto the
+				// successor at commit. A canonical child borrows its parent's manager
+				// and has no predecessor mapping of its own, so its reservation is only
+				// a temporary admission alias and must not remain in the registry.
+				if (
+					isBorrowedManager &&
+					!predecessorWasRegistered &&
+					AsyncJobManager.forEndpoint(endpointId) === ownManager
+				) {
+					AsyncJobManager.unregisterForEndpoint(endpointId);
+				}
 			},
 		};
 	}
@@ -14649,9 +14675,12 @@ export class AgentSession {
 			const noLeasePreviousSessionIdentity = this.sessionManager.getSessionId();
 			const noLeasePreviousSessionFile = this.sessionManager.getSessionFile();
 			const prepared = await this.sessionManager.prepareNewSession(options);
-			let endpointReservation: { endpointId: string; release: () => void } | undefined;
+			let endpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 			try {
-				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile);
+				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile, {
+					predecessorSessionId: noLeasePreviousSessionIdentity,
+					predecessorSessionFile: noLeasePreviousSessionFile,
+				});
 				// Last fallible gate while public getters still show the predecessor (#3138).
 				await initializeLocalRoot(this.#localProtocolOptions(prepared));
 				this.sessionManager.commitPreparedNewSession(prepared);
@@ -14659,6 +14688,7 @@ export class AgentSession {
 				// manager so post-transition lineage bindings resolve and owned
 				// aborts classify in the successor session (review thread P1).
 				this.#rekeyJobManagerForSessionIdentity(noLeasePreviousSessionIdentity, noLeasePreviousSessionFile);
+				endpointReservation?.finalize();
 				await this.#runToolSessionTransitionCleanups();
 			} catch (error) {
 				if (this.sessionManager.getSessionId() !== prepared.sessionId) endpointReservation?.release();
@@ -14728,9 +14758,12 @@ export class AgentSession {
 				throw new Error("Owned async jobs did not settle before session replacement.");
 			}
 			const prepared = await this.sessionManager.prepareNewSession(options);
-			let endpointReservation: { endpointId: string; release: () => void } | undefined;
+			let endpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 			try {
-				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile);
+				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile, {
+					predecessorSessionId: previousSessionIdentity,
+					predecessorSessionFile: previousSessionIdentityFile,
+				});
 				// Last fallible gate while public getters still show the predecessor (#3138).
 				await initializeLocalRoot(this.#localProtocolOptions(prepared));
 				this.sessionManager.commitPreparedNewSession(prepared);
@@ -14738,6 +14771,7 @@ export class AgentSession {
 				// manager so post-transition lineage bindings resolve and owned
 				// aborts classify in the successor session (review thread P1).
 				this.#rekeyJobManagerForSessionIdentity(previousSessionIdentity, previousSessionIdentityFile);
+				endpointReservation?.finalize();
 				await this.#runToolSessionTransitionCleanups();
 			} catch (error) {
 				if (this.sessionManager.getSessionId() !== prepared.sessionId) endpointReservation?.release();
@@ -14957,11 +14991,15 @@ export class AgentSession {
 					"copy-retain",
 					this.settings.get("sessionMemory.mode"),
 				);
-				let endpointReservation: { endpointId: string; release: () => void } | undefined;
+				let endpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 				try {
 					endpointReservation = this.#reserveJobManagerEndpoint(
 						forkedManager.getSessionId(),
 						forkedManager.getSessionFile(),
+						{
+							predecessorSessionId: previousSessionIdentity,
+							predecessorSessionFile: previousSessionFile,
+						},
 					);
 					await initializeLocalRoot({
 						getArtifactsDir: () => forkedManager.getArtifactsDir(),
@@ -15002,6 +15040,7 @@ export class AgentSession {
 				}
 				this.sessionManager = forkedManager;
 				this.#rekeyJobManagerForSessionIdentity(previousSessionIdentity, previousSessionFile);
+				endpointReservation?.finalize();
 				this.#quarantineQueuedAsyncResults();
 				try {
 					await previousManager.close();
@@ -15016,9 +15055,12 @@ export class AgentSession {
 				// public manager getters remain bound to the predecessor.
 				const prepared = await this.sessionManager.prepareFork();
 				if (!prepared) return false;
-				let endpointReservation: { endpointId: string; release: () => void } | undefined;
+				let endpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 				try {
-					endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile);
+					endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile, {
+						predecessorSessionId: previousSessionIdentity,
+						predecessorSessionFile: previousSessionFile,
+					});
 					await initializeLocalRoot(this.#localProtocolOptions(prepared));
 					await this.#settleOwnAsyncJobsBeforeArtifactRetirement();
 					this.sessionManager.commitPreparedNewSession(prepared);
@@ -15026,6 +15068,7 @@ export class AgentSession {
 					// Fork commits a successor endpoint identity; re-register the
 					// manager under it (review thread P1).
 					this.#rekeyJobManagerForSessionIdentity(previousSessionIdentity, previousSessionFile);
+					endpointReservation?.finalize();
 					await this.#runToolSessionTransitionCleanups();
 				} catch (error) {
 					if (this.sessionManager.getSessionId() !== prepared.sessionId) endpointReservation?.release();
@@ -17326,7 +17369,7 @@ export class AgentSession {
 			let savedPath: string | undefined;
 			let committed = false;
 			let prepared: PreparedNewSession | undefined;
-			let endpointReservation: { endpointId: string; release: () => void } | undefined;
+			let endpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 			try {
 				// Prepare successor entries, persistence, display state, and gate
 				// construction without publishing manager identity. Managed local-root
@@ -17345,7 +17388,10 @@ export class AgentSession {
 					undefined,
 					"agent",
 				);
-				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile);
+				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile, {
+					predecessorSessionId: rollbackSessionState.sessionId,
+					predecessorSessionFile: rollbackSessionState.sessionFile,
+				});
 				await this.sessionManager.ensurePreparedNewSessionOnDisk(prepared);
 				const sessionContext = this.buildPreparedDisplaySessionContext(prepared);
 				const successorGateEmitter = this.#constructWorkflowGateEmitter(prepared.sessionId);
@@ -17360,6 +17406,7 @@ export class AgentSession {
 				// Handoff commits a successor endpoint identity; re-register the
 				// manager under it (review thread P1).
 				this.#rekeyJobManagerForSessionIdentity(rollbackSessionState.sessionId, rollbackSessionState.sessionFile);
+				endpointReservation?.finalize();
 				await this.#runToolSessionTransitionCleanups();
 				this.#terminalizeQueuedSdkWorkForSessionTransition([
 					...rollbackAgentSteeringQueue,
@@ -22439,7 +22486,7 @@ export class AgentSession {
 		let ownerShutdownLease: OwnerSubagentShutdownLease | undefined;
 		let ownerShutdownTransitionCommitted = false;
 		let ownerShutdownFinalizationDeferred = false;
-		let successorEndpointReservation: { endpointId: string; release: () => void } | undefined;
+		let successorEndpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 		this.#beginSessionTransition("switch-session");
 		try {
 			const previousSessionFile = this.sessionManager.getSessionFile();
@@ -22532,6 +22579,10 @@ export class AgentSession {
 				successorEndpointReservation = this.#reserveJobManagerEndpoint(
 					this.sessionManager.getSessionId(),
 					this.sessionManager.getSessionFile(),
+					{
+						predecessorSessionId: previousSessionState.sessionId,
+						predecessorSessionFile: previousSessionState.sessionFile,
+					},
 				);
 				if (switchingToDifferentSession) this.sessionManager.stageAdoptedArtifactManagerForTransition();
 				// The successor identity is already rotated in the manager but not yet
@@ -22732,6 +22783,7 @@ export class AgentSession {
 				this.#rekeyJobManagerForSessionIdentity(previousSessionState.sessionId, previousSessionState.sessionFile, {
 					retirePredecessorRegistrations: false,
 				});
+				successorEndpointReservation?.finalize();
 				transitionCleanupCommitted = true;
 				ownerShutdownTransitionCommitted = true;
 				if (didReloadConversationChange && !switchingToDifferentSession) this.#quarantineQueuedAsyncResults();
@@ -22897,9 +22949,12 @@ export class AgentSession {
 			const prepared = selectedEntry.parentId
 				? await this.sessionManager.prepareBranchedSession(selectedEntry.parentId)
 				: await this.sessionManager.prepareNewSession({ parentSession: previousSessionFile });
-			let endpointReservation: { endpointId: string; release: () => void } | undefined;
+			let endpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 			try {
-				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile);
+				endpointReservation = this.#reserveJobManagerEndpoint(prepared.sessionId, prepared.sessionFile, {
+					predecessorSessionId: previousSessionIdentity,
+					predecessorSessionFile: previousSessionFile,
+				});
 				await initializeLocalRoot(this.#localProtocolOptions(prepared));
 				await this.#settleOwnAsyncJobsBeforeArtifactRetirement();
 				this.sessionManager.commitPreparedNewSession(prepared);
@@ -22907,6 +22962,7 @@ export class AgentSession {
 				// Branch commits a successor endpoint identity; re-register the
 				// manager under it (review thread P1).
 				this.#rekeyJobManagerForSessionIdentity(previousSessionIdentity, previousSessionFile);
+				endpointReservation?.finalize();
 				await this.#runToolSessionTransitionCleanups();
 			} catch (error) {
 				if (this.sessionManager.getSessionId() !== prepared.sessionId) endpointReservation?.release();
