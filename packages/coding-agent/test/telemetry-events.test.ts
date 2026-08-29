@@ -313,7 +313,7 @@ describe("telemetry install ID", () => {
 			});
 			await Bun.sleep(10);
 			expect(readerFinished).toBe(false);
-			await Bun.sleep(500);
+			await Bun.sleep(1_200);
 			expect(readerFinished).toBe(false);
 			releaseSync();
 			await Promise.all([publisher, reader]);

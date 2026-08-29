@@ -45,7 +45,7 @@ const INSTALL_METHODS = new Set(["bun", "npm", "binary", "migrate"]);
 const FORBIDDEN_KEY = /(?:prompt|argv|path|env|secret|account|model|provider|repo|error|hostname|username|machine|ip)/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INSTALL_ID_CLAIM_TIMEOUT_MS = 2_000;
-const INSTALL_ID_CLAIM_LEASE_MS = 200;
+const INSTALL_ID_CLAIM_LEASE_MS = 1_000;
 const INSTALL_ID_CLAIM_DELAY_MS = 1;
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
