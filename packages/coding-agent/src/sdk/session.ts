@@ -2778,6 +2778,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			requestForegroundBashBackground: () => Promise.resolve(session?.requestForegroundBashBackground() ?? false),
 
 			getSessionHome: () => getTrustedHomeDir(),
+			getSessionProfileAuthority: () => profileAuthority,
 			getCredentialSessionId: () => session?.credentialSessionId ?? credentialSessionId,
 			getMcpManager: () => mcpManager ?? options.inheritedMcpManager,
 			isManagedSessionDestination: () => sessionManager.isManagedDestination(),

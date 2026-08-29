@@ -3303,6 +3303,7 @@ export class AgentSession {
 	 */
 	#sessionTransitionKind: string | undefined;
 	#sessionTransitionDropsAsync = false;
+	#sessionTransitionAdmissionBarrier: Promise<void> | undefined;
 	#coordinatorPersistGeneration = 0;
 
 	#beginSessionTransition(kind: string): void {
@@ -3314,12 +3315,19 @@ export class AgentSession {
 		}
 		this.#sessionTransitionKind = kind;
 		this.#sessionTransitionDropsAsync = false;
+		this.#sessionTransitionAdmissionBarrier = this.#activeSessionAdmission?.settled.promise;
 		this.#coordinatorPersistGeneration += 1;
+	}
+
+	async #awaitSessionTransitionAdmission(): Promise<void> {
+		await this.#sessionTransitionAdmissionBarrier;
+		this.#sessionTransitionAdmissionBarrier = undefined;
 	}
 
 	#endSessionTransition(): void {
 		this.#sessionTransitionKind = undefined;
 		this.#sessionTransitionDropsAsync = false;
+		this.#sessionTransitionAdmissionBarrier = undefined;
 		this.yieldQueue.rearmIdle();
 	}
 
@@ -4752,6 +4760,7 @@ export class AgentSession {
 		// new/switch/fork/handoff cannot publish a competing session identity.
 		this.#beginSessionTransition("rescope-session-cwd");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			if (!enforceOneShot && this.isStreaming) {
 				throw Object.assign(new Error("Cannot relocate while a response is streaming; wait for it to finish."), {
 					code: "busy",
@@ -14832,6 +14841,7 @@ export class AgentSession {
 	}
 
 	async #runNewSessionTransition(options?: NewSessionOptions): Promise<boolean> {
+		await this.#awaitSessionTransitionAdmission();
 		const previousSessionFile = this.sessionFile;
 		const previousWorkflowGateSessionId = this.sessionId;
 		const selectionOnlyDiscoveredBuiltinToolNames = new Set(
@@ -15119,6 +15129,7 @@ export class AgentSession {
 	async clearContext(): Promise<boolean> {
 		this.#beginSessionTransition("clear-context");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			const sessionId = this.sessionId;
 			this.#disconnectFromAgent();
 			await this.abort();
@@ -15179,6 +15190,7 @@ export class AgentSession {
 		// it with handoff and the other transitions via the shared lease.
 		this.#beginSessionTransition("fork");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			const previousSessionFile = this.sessionFile;
 			const previousWorkflowGateSessionId = this.sessionId;
 			const previousSessionIdentity = this.sessionManager.getSessionId();
@@ -15688,10 +15700,13 @@ export class AgentSession {
 	 * profile activation and default-model selection.
 	 */
 	async withSdkControlMutation<T>(body: () => Promise<T>): Promise<T> {
+		const identityAdmission = this.#captureSessionIdentityAdmission();
 		// Waiting while selection owns admission deadlocks with a scheduled
 		// continuation queued behind it. Wait before acquiring the mutation lease.
 		await this.waitForIdle();
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		return this.#withSessionAdmission("selection", async () => {
+			this.#assertSessionIdentityAdmission(identityAdmission);
 			return await body();
 		});
 	}
@@ -17274,6 +17289,7 @@ export class AgentSession {
 		// navigateTree). Released in the outer finally below.
 		this.#beginSessionTransition("compact");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			if (this.#compactionAbortController) {
 				throw new Error("Compaction already in progress");
 			}
@@ -17550,7 +17566,7 @@ export class AgentSession {
 		// peer that starts after us is rejected at its own entry. Auto-triggered
 		// handoff still runs while auto-compaction owns its abort controller, but the
 		// maintenance orchestrator does not hold this lease, so acquiring it here does
-		// not self-deadlock. Released in the outer finally below.
+		// does not self-deadlock. Released in the outer finally below.
 		this.#beginSessionTransition("handoff");
 
 		this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
@@ -17561,6 +17577,7 @@ export class AgentSession {
 		this.#handoffTransitionActive = true;
 
 		this.#handoffAbortController = new AbortController();
+		await this.#awaitSessionTransitionAdmission();
 		const handoffAbortController = this.#handoffAbortController;
 		const handoffSignal = handoffAbortController.signal;
 		const sourceSignal = options?.signal;
@@ -22773,6 +22790,7 @@ export class AgentSession {
 		let successorEndpointReservation: { endpointId: string; release: () => void; finalize: () => void } | undefined;
 		this.#beginSessionTransition("switch-session");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			const previousSessionFile = this.sessionManager.getSessionFile();
 			const switchingToDifferentSession = previousSessionFile
 				? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -23201,6 +23219,7 @@ export class AgentSession {
 	}> {
 		this.#beginSessionTransition("branch");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			const previousSessionFile = this.sessionFile;
 			const previousWorkflowGateSessionId = this.sessionId;
 			const previousSessionIdentity = this.sessionManager.getSessionId();
@@ -23347,6 +23366,7 @@ export class AgentSession {
 		// live history in place, so a concurrent transition would race the same state.
 		this.#beginSessionTransition("navigate-tree");
 		try {
+			await this.#awaitSessionTransitionAdmission();
 			// Stop an active response before collecting or rewriting the branch. The
 			// active stream may otherwise append predecessor events after the new leaf
 			// is published, just as with newSession/switchSession.
