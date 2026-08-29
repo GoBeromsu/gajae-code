@@ -260,9 +260,11 @@ describe("telemetry install ID", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
-		await fs.writeFile(`${filePath}.lock`, `crashed|publishing|${Date.now() + 100}\n`, { mode: 0o600 });
+		await fs.writeFile(`${filePath}.lock`, `crashed|publishing|${Date.now() + 1_000}\n`, { mode: 0o600 });
 
+		const started = performance.now();
 		expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
+		expect(performance.now() - started).toBeLessThan(2_600);
 		expect(await fs.stat(`${filePath}.lock`).catch(() => undefined)).toBeUndefined();
 	});
 
