@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { BigIntStats, Stats } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { exactUnlinkDirect, renameNoReplacePathAsync } from "@gajae-code/natives";
@@ -360,7 +360,7 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		try {
-			const stat = await fs.stat(claimPath);
+			const stat = await fs.stat(claimPath, { bigint: true });
 			const claim = await readClaimIdentity(claimPath);
 			const publishingExpired =
 				claim?.state === "publishing" && claim.expiresAt !== undefined && claim.expiresAt <= Date.now();
@@ -380,7 +380,7 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 	throw new Error("telemetry install ID claim did not clear");
 }
 
-async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, claim: ClaimIdentity): Promise<void> {
+async function reclaimStaleClaim(claimPath: string, stat: BigIntStats, claim: ClaimIdentity): Promise<void> {
 	if (!stat.isFile()) return;
 	if (claim.state === "publishing") await syncDirectory(path.dirname(claimPath));
 	const currentClaim = await readClaimIdentity(claimPath);
@@ -404,7 +404,7 @@ async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, c
 	)
 		return;
 	const current = await fs.lstat(claimPath, { bigint: true });
-	if (current.dev !== BigInt(stat.dev) || current.ino !== BigInt(stat.ino)) return;
+	if (current.dev !== stat.dev || current.ino !== stat.ino) return;
 	const result = exactUnlinkDirect(claimPath, {
 		dev: current.dev,
 		ino: current.ino,
@@ -530,6 +530,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 	} finally {
 		heartbeatStopped = true;
 		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
+		await heartbeat;
 		await fs.rm(claimTemporaryPath, { force: true }).catch(() => undefined);
 		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
 		if (ownsClaim && (!publishedFinal || committed)) await removeOwnedClaim(claimPath, token).catch(() => undefined);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +8,7 @@ import { getTelemetryInstallId, serializeTelemetryEvent } from "../src/telemetry
 const tempDirs: string[] = [];
 const realOpen = fs.open;
 const realLstat = fs.lstat;
+const realStat = fs.stat.bind(fs);
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
@@ -526,6 +528,88 @@ describe("telemetry install ID", () => {
 		} finally {
 			openSpy.mockRestore();
 			linkSpy.mockRestore();
+		}
+	});
+
+	it("drains an in-flight refresh before failed publication cleanup", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		let releaseRefresh!: () => void;
+		const refreshGate = new Promise<void>(resolve => {
+			releaseRefresh = resolve;
+		});
+		let temporaryOpens = 0;
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (String(args[0]) === claimPath && args[1] === "r+") {
+				const originalSync = handle.sync.bind(handle);
+				handle.sync = async () => {
+					await refreshGate;
+					await originalSync();
+				};
+			}
+			if (
+				String(args[0]).startsWith(`${filePath}.`) &&
+				String(args[0]).endsWith(".tmp") &&
+				!String(args[0]).includes(".lock.") &&
+				++temporaryOpens === 2
+			) {
+				await handle.close();
+				await Bun.sleep(100);
+				const error = new Error("staged write failed") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return handle;
+		});
+
+		try {
+			const publisher = getTelemetryInstallId(filePath).then(
+				() => undefined,
+				error => error,
+			);
+			await Bun.sleep(50);
+			releaseRefresh();
+			const failure = await publisher;
+			expect(failure).toMatchObject({ code: "EIO" });
+			expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
+		} finally {
+			releaseRefresh();
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
+
+	it("preserves large bigint claim identities without numeric rounding", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, `stale|publishing|${Date.now() - 1}\n`, { mode: 0o600 });
+		const statSpy = spyOn(fs, "stat").mockImplementation((async (
+			file: Parameters<typeof fs.stat>[0],
+			options: Parameters<typeof fs.stat>[1],
+		) => {
+			const actual = (await realStat(file, options as never)) as unknown as BigIntStats;
+			if (String(file) !== claimPath) return actual as never;
+			const huge = 2n ** 60n;
+			return Object.assign(actual, { dev: huge, ino: huge + 1n });
+		}) as never);
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+			expect(statSpy).toHaveBeenCalledWith(claimPath, { bigint: true });
+			expect(await fs.readFile(claimPath, "utf8")).toContain("publishing");
+		} finally {
+			statSpy.mockRestore();
 		}
 	});
 });
