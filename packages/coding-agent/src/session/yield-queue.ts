@@ -86,30 +86,34 @@ export class YieldQueue {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
 		}
-		const idleMessages: AgentMessage[] = [];
-		for (const [kind, dispatcher] of this.#dispatchers) {
-			const entries = this.#drain(kind);
-			if (entries.length === 0) continue;
-			const messages = this.#build(kind, dispatcher, entries) ?? [];
+		const messages = this.drainMessages();
+		if (mode === "streaming") {
 			for (const message of messages) {
-				if (mode === "streaming") {
-					try {
-						this.#options.injectStreaming(message);
-					} catch (error) {
-						logger.warn("Yield queue streaming dispatch failed", { kind, error: formatError(error) });
-					}
-				} else {
-					idleMessages.push(message);
+				try {
+					this.#options.injectStreaming(message);
+				} catch (error) {
+					logger.warn("Yield queue streaming dispatch failed", { error: formatError(error) });
 				}
 			}
+			return;
 		}
-		if (mode === "idle" && idleMessages.length > 0) {
+		if (messages.length > 0) {
 			try {
-				await this.#options.injectIdle(idleMessages);
+				await this.#options.injectIdle(messages);
 			} catch (error) {
 				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
 			}
 		}
+	}
+
+	drainMessages(): AgentMessage[] {
+		const messages: AgentMessage[] = [];
+		for (const [kind, dispatcher] of this.#dispatchers) {
+			const entries = this.#drain(kind);
+			if (entries.length === 0) continue;
+			messages.push(...(this.#build(kind, dispatcher, entries) ?? []));
+		}
+		return messages;
 	}
 
 	clear(): void {
