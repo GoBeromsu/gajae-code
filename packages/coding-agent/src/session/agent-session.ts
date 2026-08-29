@@ -3395,16 +3395,18 @@ export class AgentSession {
 			this.#activateNextSessionAdmission();
 			throw this.#sessionAdmissionBusyError();
 		}
-		// Re-check the handoff fence after activation: a prompt queued before the
-		// transition began must not start once the fence is up.
-		if (kind === "prompt" && this.#handoffTransitionActive) {
+		// Re-check the full session-transition fence after activation: an admission
+		// queued before an identity transition began must not execute against the
+		// rewritten session. This check must remain after ready.promise because the
+		// transition can begin while a queued entry is activating.
+		try {
+			this.#assertNoSessionTransitionAdmission();
+		} catch (error) {
 			entry.released = true;
 			entry.settled.resolve();
 			if (this.#activeSessionAdmission === entry) this.#activeSessionAdmission = undefined;
 			this.#activateNextSessionAdmission();
-			throw Object.assign(new AgentBusyError("Cannot start a turn while a handoff is in progress."), {
-				code: "busy",
-			});
+			throw error;
 		}
 
 		const release = () => {
@@ -8665,7 +8667,11 @@ export class AgentSession {
 
 	#assertJobManagerEndpointAdmission(successorSessionId: string, successorSessionFile: string | undefined): void {
 		const successorEndpointId = this.#asyncJobEndpointId(successorSessionId, successorSessionFile);
-		const ownManager = this.#ownedAsyncJobManager ?? AsyncJobManager.instance();
+		// A directly constructed AgentSession may observe a process-global fallback
+		// manager, but it does not own that manager's endpoint authority. Only an
+		// explicitly supplied session manager can admit a successor on this session's
+		// behalf; inherited child managers are supplied explicitly by the SDK too.
+		const ownManager = this.#ownedAsyncJobManager;
 		const successorOwner = AsyncJobManager.forEndpoint(successorEndpointId);
 		if (ownManager && successorOwner !== undefined && successorOwner !== ownManager) {
 			throw new Error(
@@ -8688,7 +8694,9 @@ export class AgentSession {
 		options: { predecessorSessionId?: string; predecessorSessionFile?: string } = {},
 	): { endpointId: string; release: () => void; finalize: () => void } | undefined {
 		const endpointId = this.#asyncJobEndpointId(successorSessionId, successorSessionFile);
-		const ownManager = this.#ownedAsyncJobManager ?? AsyncJobManager.instance();
+		// Never claim the process-global fallback from a direct/public AgentSession
+		// that was not given an owned (or explicitly inherited) manager.
+		const ownManager = this.#ownedAsyncJobManager;
 		if (!ownManager) return undefined;
 		this.#assertJobManagerEndpointAdmission(successorSessionId, successorSessionFile);
 		if (AsyncJobManager.forEndpoint(endpointId) === ownManager) {
@@ -8747,12 +8755,15 @@ export class AgentSession {
 		);
 		const predecessorOwner = AsyncJobManager.forEndpoint(previousEndpointId);
 		// Rekey and retire ONLY when the predecessor key belongs to THIS
-		// session's manager (the session-owned manager, else the process-global
-		// fallback the session uses). A predecessor key held by a FOREIGN
+		// session's explicitly supplied manager. A predecessor key held by a FOREIGN
 		// manager means another live session currently carries this id —
 		// neither the mapping nor the tuples keyed under it are ours to move
 		// or retire (review thread P1).
-		const ownManager = this.#ownedAsyncJobManager ?? AsyncJobManager.instance();
+		// Endpoint ownership is authoritative only for the manager supplied to this
+		// session. A direct/public session without one must not rekey whichever
+		// manager happens to be process-global at the time of transition.
+		const ownManager = this.#ownedAsyncJobManager;
+		if (!ownManager) return;
 		if (predecessorOwner !== undefined && predecessorOwner !== ownManager) return;
 		if (predecessorOwner !== undefined) {
 			const rekeyed = AsyncJobManager.rekeyForEndpoint(previousEndpointId, currentEndpointId, predecessorOwner);
@@ -8891,7 +8902,7 @@ export class AgentSession {
 		// belong to this session's owned manager (including still-running jobs).
 		// Retire them before unregistering/disconnecting that manager; inherited
 		// managers are shared with a parent and must not be swept by endpoint.
-		if (this.#ownedAsyncJobManager) {
+		if (this.#ownedAsyncJobManager && this.#disposeAsyncJobManager) {
 			retireOwnedRegistrationsForEndpoint(this.#ownedRegistrationEndpoint());
 		}
 		this.yieldQueue.clear();
@@ -12460,6 +12471,7 @@ export class AgentSession {
 		if (typeof text !== "string" || (text.trim().length === 0 && !hasUsableImage))
 			throw Object.assign(new Error("Prompt must not be empty."), { code: "invalid_input" });
 		this.#assertRecoveryHydrationPromoted();
+		this.#assertNoSessionTransitionAdmission();
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -12484,6 +12496,7 @@ export class AgentSession {
 		if (typeof text !== "string" || (text.trim().length === 0 && !hasUsableImage))
 			throw Object.assign(new Error("Prompt must not be empty."), { code: "invalid_input" });
 		this.#assertRecoveryHydrationPromoted();
+		this.#assertNoSessionTransitionAdmission();
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -12511,7 +12524,7 @@ export class AgentSession {
 			sdkRunToken?: string;
 		},
 	): Promise<void> {
-		this.#assertNoHandoffTransition();
+		this.#assertNoSessionTransitionAdmission();
 		assertImagePlaceholdersHavePayload(text, images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -12559,7 +12572,7 @@ export class AgentSession {
 			sdkRunToken?: string;
 		},
 	): Promise<QueuedFollowUpOwner> {
-		this.#assertNoHandoffTransition();
+		this.#assertNoSessionTransitionAdmission();
 		assertImagePlaceholdersHavePayload(text, images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		const queueWasEmpty = !this.agent.hasQueuedMessages();

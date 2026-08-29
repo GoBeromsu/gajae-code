@@ -101,6 +101,24 @@ describe("YieldQueue", () => {
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["a,b"]);
 	});
 
+	test("fenced scheduled idle flush clears pending state for transition-end rearm", async () => {
+		const harness = createHarness(false);
+		harness.queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+
+		harness.queue.enqueue("items", { id: "held" });
+		harness.setTransitionFenced(true);
+		await harness.scheduledFlushes[0]!();
+
+		harness.setTransitionFenced(false);
+		harness.queue.rearmIdle();
+		expect(harness.scheduledFlushes).toHaveLength(2);
+		await harness.scheduledFlushes[1]!();
+
+		expect(harness.idleBatches.map(batch => batch.map(messageText))).toEqual([["held"]]);
+	});
+
 	test("isStale drops stale entries and keeps survivors", async () => {
 		const harness = createHarness(true);
 		let survivorIds: string[] = [];
