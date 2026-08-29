@@ -5563,6 +5563,12 @@ export class AgentSession {
 		}
 	}
 
+	#quarantineQueuedAsyncResults(): void {
+		this.#suppressOwnAsyncJobDeliveries();
+		this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainKindMessages("async-result", true));
+		this.yieldQueue.clearKind("async-result");
+	}
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -8761,6 +8767,7 @@ export class AgentSession {
 		// leak its background bash/task work into the parent's manager. Only
 		// the session that owns the manager goes on to dispose it (which itself
 		// nukes any leftover jobs and pending deliveries).
+		this.#suppressOwnAsyncJobDeliveries();
 		this.#cancelOwnAsyncJobs();
 		this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainMessages(true));
 		this.yieldQueue.clear();
@@ -14528,9 +14535,7 @@ export class AgentSession {
 			this.#closeAllProviderSessions("new session");
 			this.#rebindProviderSessionState(new Map());
 			this.#terminalizeQueuedSdkWorkForSessionTransition(this.#queuedMessagesForSessionTransition());
-			this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainKindMessages("async-result", true));
-			this.#suppressOwnAsyncJobDeliveries();
-			this.yieldQueue.clearKind("async-result");
+			this.#quarantineQueuedAsyncResults();
 			this.#resetActiveSdkRunOwnership();
 			this.agent.reset();
 			if (!options?.drop) await this.sessionManager.flush();
@@ -14751,8 +14756,8 @@ export class AgentSession {
 			this.#disconnectFromAgent();
 			await this.abort();
 			this.#cancelOwnAsyncJobs();
-			const queuedMessages = this.yieldQueue.drainMessages(true);
 			this.#suppressOwnAsyncJobDeliveries();
+			const queuedMessages = this.yieldQueue.drainMessages(true);
 			this.#settleDeliveredOwnedRegistrations(queuedMessages);
 			this.yieldQueue.clear();
 			this.#pendingBackgroundExchanges = [];
@@ -17268,9 +17273,7 @@ export class AgentSession {
 				// not the successor. Suppress and drop ONLY the async-result kind so they
 				// never flush into the new session; MCP resource notifications are
 				// server-scoped and are preserved for the successor.
-				this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainKindMessages("async-result", true));
-				this.#suppressOwnAsyncJobDeliveries();
-				this.yieldQueue.clearKind("async-result");
+				this.#quarantineQueuedAsyncResults();
 
 				// The successor identity/emitter/provider state is now fully live and
 				// predecessor deliveries are suppressed, so release the turn-admission
@@ -22584,6 +22587,7 @@ export class AgentSession {
 						this.sessionManager.retireEphemeralArtifactsAfterTransition();
 						await this.#runToolSessionTransitionCleanups();
 					}
+					this.#quarantineQueuedAsyncResults();
 				}
 				this.#reconnectToAgent();
 				// Fence predecessor continuations before session_switch starts SDK runtime
