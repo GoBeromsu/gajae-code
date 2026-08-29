@@ -42,6 +42,8 @@ const RESULTS = new Set(["available", "up_to_date", "installed", "failed", "skip
 const INSTALL_METHODS = new Set(["bun", "npm", "binary", "migrate"]);
 const FORBIDDEN_KEY = /(?:prompt|argv|path|env|secret|account|model|provider|repo|error|hostname|username|machine|ip)/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TELEMETRY_INSTALL_ID_CONVERGENCE_TIMEOUT_MS = 100;
+const TELEMETRY_INSTALL_ID_CONVERGENCE_DELAY_MS = 1;
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
 	if (value === null || typeof value !== "object") return false;
@@ -134,9 +136,22 @@ export async function getTelemetryInstallId(
 		return generated;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		const existing = (await Bun.file(filePath).text()).trim();
-		if (!UUID_V4.test(existing)) throw new Error("telemetry install ID is malformed");
+		const existing = await readInstallIdWithConvergence(filePath);
 		await fs.chmod(filePath, 0o600);
 		return existing;
 	}
+}
+
+async function readInstallIdWithConvergence(filePath: string): Promise<string> {
+	const deadline = Date.now() + TELEMETRY_INSTALL_ID_CONVERGENCE_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		try {
+			const existing = (await Bun.file(filePath).text()).trim();
+			if (UUID_V4.test(existing)) return existing;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		await Bun.sleep(TELEMETRY_INSTALL_ID_CONVERGENCE_DELAY_MS);
+	}
+	throw new Error("telemetry install ID is malformed");
 }

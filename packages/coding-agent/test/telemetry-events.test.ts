@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -108,5 +108,51 @@ describe("telemetry install ID", () => {
 
 		expect(ids[0]).toBe(ids[1]);
 		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+	});
+
+	it("converges after an empty and partial winner payload", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const originalOpen = fs.open.bind(fs);
+		const openSpy = spyOn(fs, "open").mockImplementationOnce(async () => {
+			const winner = await originalOpen(filePath, "w", 0o644);
+			await winner.close();
+			setTimeout(() => {
+				void fs
+					.writeFile(filePath, "123e4567-e89b-", { mode: 0o644 })
+					.then(() => fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o644 }));
+			}, 10);
+			const error = new Error("file already exists") as NodeJS.ErrnoException;
+			error.code = "EEXIST";
+			throw error;
+		});
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+			expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
+	it("fails closed when a raced winner never publishes a valid UUID", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const originalOpen = fs.open.bind(fs);
+		const openSpy = spyOn(fs, "open").mockImplementationOnce(async () => {
+			const winner = await originalOpen(filePath, "w", 0o600);
+			await winner.close();
+			const error = new Error("file already exists") as NodeJS.ErrnoException;
+			error.code = "EEXIST";
+			throw error;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
+		} finally {
+			openSpy.mockRestore();
+		}
 	});
 });
