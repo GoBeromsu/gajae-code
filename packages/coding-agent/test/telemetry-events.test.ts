@@ -144,6 +144,24 @@ describe("telemetry install ID", () => {
 		expect((await fs.readdir(directory)).sort()).toEqual(["telemetry-install-id", "telemetry-install-id.stale.tmp"]);
 	});
 
+	it("fails closed when the profile filesystem rejects exclusive publication", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("hard links are unavailable");
+			expect(await fs.readdir(directory)).toEqual([]);
+		} finally {
+			linkSpy.mockRestore();
+		}
+	});
+
 	it("fails closed when a raced winner never publishes a valid UUID", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);

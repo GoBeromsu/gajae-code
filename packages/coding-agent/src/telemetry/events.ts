@@ -115,7 +115,7 @@ async function publishNewInstallId(filePath: string, installId: string): Promise
 		}
 		await fs.link(tempPath, filePath);
 	} finally {
-		await fs.rm(tempPath, { force: true });
+		await fs.rm(tempPath, { force: true }).catch(() => undefined);
 	}
 }
 
