@@ -17,6 +17,7 @@ export interface YieldDispatcher<P> {
 
 export interface YieldQueueOptions {
 	isStreaming: () => boolean;
+	isTransitionFenced?: () => boolean;
 	injectStreaming(msg: AgentMessage): void;
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
@@ -86,6 +87,7 @@ export class YieldQueue {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
 		}
+		if (mode === "streaming" && this.#options.isTransitionFenced?.()) return;
 		const messages = this.drainMessages();
 		if (mode === "streaming") {
 			for (const message of messages) {
@@ -131,6 +133,8 @@ export class YieldQueue {
 	/** Drop only the queued entries of a single kind, leaving other kinds intact. */
 	clearKind(kind: string): void {
 		this.#entries.delete(kind);
+		this.#idleFlushPending = false;
+		this.rearmIdle();
 	}
 
 	/**
