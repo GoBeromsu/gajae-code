@@ -170,7 +170,7 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
 async function readPublishedInstallId(filePath: string): Promise<string> {
 	const stat = await fs.lstat(filePath, { bigint: true });
 	if (stat.size > BigInt(INSTALL_ID_MAX_SERIALIZED_BYTES)) throw new Error("telemetry install ID is malformed");
-	const existing = (await Bun.file(filePath).text()).trim();
+	const existing = (await Bun.file(filePath).slice(0, INSTALL_ID_MAX_SERIALIZED_BYTES).text()).trim();
 	if (!UUID_V4.test(existing)) throw new Error("telemetry install ID is malformed");
 	return existing;
 }
@@ -664,7 +664,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		await heartbeat;
 		await fs.rm(claimTemporaryPath, { force: true }).catch(() => undefined);
 		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
-		if (ownsClaim && (!publishedFinal || committed)) await removeOwnedClaim(claimPath, token).catch(() => undefined);
+		if (ownsClaim && (!publishedFinal || committed)) void removeOwnedClaim(claimPath, token).catch(() => undefined);
 	}
 }
 

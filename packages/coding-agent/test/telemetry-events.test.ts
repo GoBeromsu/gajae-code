@@ -484,6 +484,12 @@ describe("telemetry install ID", () => {
 			if (String(file) !== filePath) return target;
 			return new Proxy(target, {
 				get(object, property, receiver) {
+					if (property === "slice")
+						return (...args: Parameters<typeof object.slice>) => {
+							void fs.rm(claimPath, { force: true });
+							raceFired = true;
+							return object.slice(...args);
+						};
 					if (property !== "text") return Reflect.get(object, property, receiver);
 					return async () => {
 						const result = await object.text();
@@ -740,6 +746,7 @@ describe("telemetry install ID", () => {
 			const failure = await publisher;
 			expect(failure).toMatchObject({ code: "EIO" });
 			expect(refreshes).toBeGreaterThan(0);
+			await Bun.sleep(50);
 			expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
 		} finally {
 			releaseRefresh();
