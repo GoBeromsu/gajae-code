@@ -44,6 +44,8 @@ const INSTALL_METHODS = new Set(["bun", "npm", "binary", "migrate"]);
 const FORBIDDEN_KEY = /(?:prompt|argv|path|env|secret|account|model|provider|repo|error|hostname|username|machine|ip)/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INSTALL_ID_CLAIM_TIMEOUT_MS = 2_000;
+const INSTALL_ID_CLAIM_RECOVERY_MARGIN_MS = 500;
+const INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS = INSTALL_ID_CLAIM_TIMEOUT_MS + INSTALL_ID_CLAIM_RECOVERY_MARGIN_MS;
 const INSTALL_ID_CLAIM_LEASE_MS = 1_000;
 const INSTALL_ID_CLAIM_POLL_INITIAL_MS = 25;
 const durableInstallIdPaths = new Map<string, Promise<void>>();
@@ -170,7 +172,7 @@ async function readPublishedInstallId(filePath: string): Promise<string> {
 }
 
 async function readExistingInstallId(filePath: string): Promise<string> {
-	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
+	const deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
 	while (true) {
 		try {
 			return await readExistingInstallIdSnapshot(filePath);
@@ -260,7 +262,7 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 		durability.catch(() => durableInstallIdPaths.delete(filePath));
 	}
 	await durability;
-	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
+	const deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
 	while (true) {
 		const value = await readPublishedInstallId(filePath);
 		try {
@@ -392,7 +394,7 @@ function serializeClaim(token: string, state: Exclude<ClaimState, undefined>, ex
 
 async function waitForClaimRelease(
 	claimPath: string,
-	deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS,
+	deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS,
 ): Promise<void> {
 	while (Date.now() < deadline) {
 		try {
@@ -422,7 +424,7 @@ async function waitForClaimRelease(
 }
 
 async function convergeAfterClaim(filePath: string): Promise<string> {
-	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
+	const deadline = Date.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		await waitForClaimRelease(`${filePath}.lock`, deadline);
 		try {
