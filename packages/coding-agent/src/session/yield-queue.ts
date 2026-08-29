@@ -40,6 +40,7 @@ export class YieldQueue {
 	readonly #dispatchers = new Map<string, StoredDispatcher>();
 	readonly #entries = new Map<string, unknown[]>();
 	#idleFlushPending = false;
+	#deferredIdleMessages: AgentMessage[] = [];
 
 	constructor(options: YieldQueueOptions) {
 		this.#options = options;
@@ -85,10 +86,13 @@ export class YieldQueue {
 
 	async flush(mode: YieldFlushMode): Promise<void> {
 		if (mode === "idle") {
+			if (this.#options.isTransitionFenced?.()) return;
 			this.#idleFlushPending = false;
 		}
 		if (mode === "streaming" && this.#options.isTransitionFenced?.()) return;
-		const messages = this.drainMessages();
+		const messages =
+			mode === "idle" ? [...this.#deferredIdleMessages, ...this.drainMessages()] : this.drainMessages();
+		if (mode === "idle") this.#deferredIdleMessages = [];
 		if (mode === "streaming") {
 			for (const message of messages) {
 				try {
@@ -106,6 +110,12 @@ export class YieldQueue {
 				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
 			}
 		}
+	}
+
+	deferIdle(messages: AgentMessage[]): void {
+		if (messages.length === 0) return;
+		this.#deferredIdleMessages.push(...messages);
+		this.#scheduleIdleFlush();
 	}
 
 	drainMessages(includeStale = false): AgentMessage[] {
@@ -127,6 +137,7 @@ export class YieldQueue {
 
 	clear(): void {
 		this.#entries.clear();
+		this.#deferredIdleMessages = [];
 		this.#idleFlushPending = false;
 	}
 
@@ -144,6 +155,10 @@ export class YieldQueue {
 	 */
 	rearmIdle(): void {
 		if (this.#options.isStreaming()) return;
+		if (this.#deferredIdleMessages.length > 0) {
+			this.#scheduleIdleFlush();
+			return;
+		}
 		for (const entries of this.#entries.values()) {
 			if (entries.length > 0) {
 				this.#scheduleIdleFlush();

@@ -4204,8 +4204,12 @@ export class AgentSession {
 						this.#isDisposed ||
 						this.#sessionTransitionKind !== undefined ||
 						this.#coordinatorPersistGeneration !== admissionGeneration
-					)
+					) {
+						if (this.#isDisposed || this.#sessionTransitionDropsAsync)
+							this.#settleDeliveredOwnedRegistrations(survivors);
+						else this.yieldQueue.deferIdle(survivors);
 						return;
+					}
 					// A user prompt may have started during the barrier/scheduling
 					// delay: if the session is now streaming, mutating the epoch and
 					// lineage here would corrupt the ACTIVE user turn (and
