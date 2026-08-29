@@ -58,6 +58,7 @@ import {
 	observeOwnerTerminal,
 	type PlanResponse,
 	planTmuxOwnerIsolationSync,
+	readNoFollowJson,
 	replaceOwnerGenerationSync,
 	type TmuxOwnerIsolationExecutionDependencies,
 	type TmuxOwnerIsolationExecutionResult,
@@ -1529,11 +1530,11 @@ async function waitForExpectedVerdict(
 	while (now().getTime() <= deadline) {
 		try {
 			const [verdictBody, aliasBody] = await Promise.all([
-				fs.readFile(verdictFile, "utf8"),
-				fs.readFile(verdictAliasFile, "utf8"),
+				readNoFollowJson(verdictFile),
+				readNoFollowJson(verdictAliasFile),
 			]);
-			const verdict: unknown = JSON.parse(verdictBody);
-			const alias: unknown = JSON.parse(aliasBody);
+			const verdict: unknown = verdictBody;
+			const alias: unknown = aliasBody;
 			if (
 				isValidOwnerVerdict(verdict) &&
 				typeof alias === "object" &&
