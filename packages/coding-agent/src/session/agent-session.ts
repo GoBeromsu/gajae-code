@@ -2251,6 +2251,17 @@ export class StreamingEditFileCache {
 	}
 }
 type SessionAdmissionKind = "prompt" | "selection";
+/** Identity captured before an async mutator may yield. */
+type SessionIdentityAdmission = {
+	readonly manager: SessionManager;
+	readonly sessionId: string;
+	readonly sessionFile: string | undefined;
+	readonly transitionGeneration: number;
+};
+/** Per-hook exception token; its generation invalidates when a transition starts. */
+type InternalTransitionEmissionToken = {
+	readonly transitionGeneration: number;
+};
 class SessionRunCancellationDomainBridge implements RunCancellationDomainBridge {
 	#domains = new Map<string, { domain: RunCancellationDomain; controller: AbortController }>();
 	#released = new Set<string>();
@@ -2413,6 +2424,10 @@ export class AgentSession {
 	#sessionAdmissionClosing = false;
 	#sessionAdmissionClosed = false;
 	#sessionAdmissionContext = new AsyncLocalStorage<SessionAdmissionEntry>();
+	// Lifecycle hooks are allowed to append successor context while the transition
+	// lease is held. Keep that exception in async-local state: a mutable boolean
+	// would also exempt unrelated work that runs concurrently while the hook awaits.
+	#internalTransitionEmissionContext = new AsyncLocalStorage<InternalTransitionEmissionToken>();
 	#selectionFenceGenerationContext = new AsyncLocalStorage<number>();
 	#selectionFenceTail: Promise<void> = Promise.resolve();
 	#pendingSelectionFences = 0;
@@ -3238,14 +3253,42 @@ export class AgentSession {
 	 * error because callers use it to distinguish that explicit operation from
 	 * the other transition fences.
 	 */
-	#assertNoSessionTransitionAdmission(): void {
+	#assertNoSessionTransitionAdmission(options?: { allowInternalTransitionEmission?: boolean }): void {
 		if (this.#handoffTransitionActive) {
 			this.#assertNoHandoffTransition();
 		}
-		if (this.#sessionTransitionKind !== undefined) {
+		if (
+			this.#sessionTransitionKind !== undefined &&
+			!(options?.allowInternalTransitionEmission === true && this.#isInternalTransitionEmission())
+		) {
 			throw Object.assign(new AgentBusyError("Cannot start a turn while a session transition is in progress."), {
 				code: "busy",
 			});
+		}
+	}
+
+	#captureSessionIdentityAdmission(): SessionIdentityAdmission {
+		return {
+			manager: this.sessionManager,
+			sessionId: this.sessionManager.getSessionId(),
+			sessionFile: this.sessionManager.getSessionFile(),
+			transitionGeneration: this.#coordinatorPersistGeneration,
+		};
+	}
+
+	#sessionIdentityAdmissionMatches(admission: SessionIdentityAdmission): boolean {
+		return (
+			this.sessionManager === admission.manager &&
+			this.sessionManager.getSessionId() === admission.sessionId &&
+			this.sessionManager.getSessionFile() === admission.sessionFile &&
+			this.#coordinatorPersistGeneration === admission.transitionGeneration
+		);
+	}
+
+	#assertSessionIdentityAdmission(admission: SessionIdentityAdmission): void {
+		this.#assertNoSessionTransitionAdmission();
+		if (!this.#sessionIdentityAdmissionMatches(admission)) {
+			throw new Error("Session changed while selecting model");
 		}
 	}
 
@@ -3261,8 +3304,6 @@ export class AgentSession {
 	#sessionTransitionKind: string | undefined;
 	#sessionTransitionDropsAsync = false;
 	#coordinatorPersistGeneration = 0;
-	/** True only while a post-commit lifecycle hook is being emitted. */
-	#internalTransitionEmission = false;
 
 	#beginSessionTransition(kind: string): void {
 		if (this.#sessionTransitionKind !== undefined) {
@@ -3282,14 +3323,20 @@ export class AgentSession {
 		this.yieldQueue.rearmIdle();
 	}
 
+	#isInternalTransitionEmission(): boolean {
+		const token = this.#internalTransitionEmissionContext.getStore();
+		return (
+			token !== undefined &&
+			token.transitionGeneration === this.#coordinatorPersistGeneration &&
+			this.#sessionTransitionKind !== undefined
+		);
+	}
+
 	async #emitInternalTransitionEvent<T>(emit: () => Promise<T>): Promise<T> {
-		const previous = this.#internalTransitionEmission;
-		this.#internalTransitionEmission = true;
-		try {
-			return await emit();
-		} finally {
-			this.#internalTransitionEmission = previous;
-		}
+		return await this.#internalTransitionEmissionContext.run(
+			{ transitionGeneration: this.#coordinatorPersistGeneration },
+			emit,
+		);
 	}
 
 	#activateNextSessionAdmission(): void {
@@ -4871,7 +4918,7 @@ export class AgentSession {
 						}
 					}
 					try {
-						await participant.rebindCwdCapturingAuthority(canonicalFrom);
+						await this.#emitInternalTransitionEvent(() => participant.rebindCwdCapturingAuthority(canonicalFrom));
 					} catch (error) {
 						restoreErrors.push(error instanceof Error ? error : new Error(String(error)));
 					}
@@ -4913,7 +4960,9 @@ export class AgentSession {
 						// Plugin/MCP/Python authority must be rebound successfully
 						// before committing; swallowing a failure here is what leaves
 						// a moved session holding launch-root tool authority.
-						await participant.rebindCwdCapturingAuthority(canonicalTarget);
+						await this.#emitInternalTransitionEvent(() =>
+							participant.rebindCwdCapturingAuthority(canonicalTarget),
+						);
 					} catch (error) {
 						rescopeFailure = error;
 					}
@@ -9923,8 +9972,10 @@ export class AgentSession {
 			previousSelectedMCPToolNames?: string[];
 			previousSelectedDiscoveredBuiltinToolNames?: string[];
 			nextSelectedDiscoveredBuiltinToolNames?: string[];
+			identityAdmission?: SessionIdentityAdmission;
 		},
 	): Promise<void> {
+		if (options?.identityAdmission) this.#assertSessionIdentityAdmission(options.identityAdmission);
 		toolNames = [...new Set([...toolNames.map(name => name.toLowerCase()), ...this.#mandatoryMCPToolNames])];
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const previousSelectedDiscoveredBuiltinToolNames =
@@ -9967,6 +10018,7 @@ export class AgentSession {
 				const built = await this.#runAdmittedBaseSystemPromptRebuild(() =>
 					this.#rebuildSystemPrompt!(validToolNames, this.#toolRegistry),
 				);
+				if (options?.identityAdmission) this.#assertSessionIdentityAdmission(options.identityAdmission);
 				if (this.#isDisposed) {
 					if (generation === this.#baseSystemPromptGeneration) {
 						this.#pendingAppliedToolSignature = undefined;
@@ -9989,6 +10041,7 @@ export class AgentSession {
 			this.#lastAppliedToolSignature = signature;
 			this.#pendingAppliedToolSignature = undefined;
 		}
+		if (options?.identityAdmission) this.#assertSessionIdentityAdmission(options.identityAdmission);
 		if (promptRelevantToolsChanged) this.#defaultModelSelectionMutationRevision++;
 		this.#selectedMCPToolNames = nextSelectedMCPToolNames;
 		this.#selectedDiscoveredToolNames = nextSelectedDiscoveredBuiltinToolNames;
@@ -10055,6 +10108,7 @@ export class AgentSession {
 	 * Changes take effect before the next model call.
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
+		this.#assertNoSessionTransitionAdmission();
 		await this.#applyActiveToolsByName(toolNames);
 	}
 
@@ -10200,6 +10254,7 @@ export class AgentSession {
 	 * This allows /mcp add/remove/reauth to take effect without restarting the session.
 	 */
 	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
+		this.#assertNoSessionTransitionAdmission({ allowInternalTransitionEmission: true });
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const existingNames = Array.from(this.#toolRegistry.keys());
 		for (const name of existingNames) {
@@ -10668,6 +10723,7 @@ export class AgentSession {
 
 	/** Pin one OAuth credential for this session scope and persist the minimal intent. */
 	async setCredentialPin(provider: string, selector: AuthCredentialSelector): Promise<void> {
+		this.#assertNoSessionTransitionAdmission();
 		const scopeId = this.credentialSessionId;
 		const authStorage = this.#modelRegistry.authStorage;
 		const authStorageOwner = this.#modelRegistry.getAuthStorageOwner();
@@ -10687,6 +10743,7 @@ export class AgentSession {
 
 	/** Mask persistent/global selection for this session and restore AUTO ranking. */
 	async setCredentialAuto(provider: string): Promise<void> {
+		this.#assertNoSessionTransitionAdmission();
 		const scopeId = this.credentialSessionId;
 		this.#modelRegistry.authStorage.setSessionCredentialAuto(provider, scopeId);
 		this.sessionManager.appendCustomEntry("auth-credential-pin", {
@@ -10740,6 +10797,7 @@ export class AgentSession {
 	}
 
 	setPlanModeState(state: PlanModeState | undefined): void {
+		this.#assertNoSessionTransitionAdmission();
 		this.#planModeState = state;
 		if (state?.enabled) {
 			this.#planReferenceSent = false;
@@ -10818,6 +10876,7 @@ export class AgentSession {
 	async setSdkPlanMode(on: boolean): Promise<PlanModeState | undefined> {
 		if (typeof on !== "boolean")
 			throw Object.assign(new Error("mode.plan.set requires a boolean on value."), { code: "invalid_input" });
+		this.#assertNoSessionTransitionAdmission();
 		if (!this.#sdkPlanModeHandler) {
 			throw Object.assign(new Error("mode.plan.set requires an active host plan-mode lifecycle."), {
 				code: "unavailable",
@@ -12635,7 +12694,7 @@ export class AgentSession {
 			sdkRunToken?: string;
 		},
 	): Promise<void> {
-		this.#assertNoSessionTransitionAdmission();
+		this.#assertNoSessionTransitionAdmission({ allowInternalTransitionEmission: true });
 		assertImagePlaceholdersHavePayload(text, images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -12683,7 +12742,7 @@ export class AgentSession {
 			sdkRunToken?: string;
 		},
 	): Promise<QueuedFollowUpOwner> {
-		this.#assertNoSessionTransitionAdmission();
+		this.#assertNoSessionTransitionAdmission({ allowInternalTransitionEmission: true });
 		assertImagePlaceholdersHavePayload(text, images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		const queueWasEmpty = !this.agent.hasQueuedMessages();
@@ -13050,7 +13109,7 @@ export class AgentSession {
 		// fenced before either mutation. A post-commit lifecycle hook gets a narrow
 		// append-only exception so its successor-context emission is not lost while
 		// the identity mutex remains held; trigger-turn requests stay fenced.
-		if (!(this.#internalTransitionEmission && options?.triggerTurn !== true))
+		if (!(this.#isInternalTransitionEmission() && options?.triggerTurn !== true))
 			this.#assertNoSessionTransitionAdmission();
 		const appMessage: CustomMessage<T> = {
 			role: "custom",
@@ -15263,13 +15322,17 @@ export class AgentSession {
 			onMutationStarted?: () => void;
 		},
 	): Promise<void> {
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		const previousEditMode = this.#resolveActiveEditMode();
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.credentialSessionId);
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		if (!apiKey) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		options?.onMutationStarted?.();
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		this.#setModelAuthoritatively(model, options?.cause ?? "user-selection");
 		this.#seedSessionCanonicalVariant(model);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
@@ -15455,11 +15518,17 @@ export class AgentSession {
 	 * Session-scoped only: does not persist `modelProfile.default`.
 	 */
 	async activateModelProfileForControl(profileName: string): Promise<boolean> {
-		await activateModelProfile({
-			session: this,
-			modelRegistry: this.#modelRegistry,
-			settings: this.settings,
-			profileName,
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		this.#assertSessionIdentityAdmission(identityAdmission);
+		await this.#withSessionAdmission("selection", async () => {
+			this.#assertSessionIdentityAdmission(identityAdmission);
+			await activateModelProfile({
+				session: this,
+				modelRegistry: this.#modelRegistry,
+				settings: this.settings,
+				profileName,
+			});
+			this.#assertSessionIdentityAdmission(identityAdmission);
 		});
 		return this.getActiveModelProfile() === profileName;
 	}
@@ -15743,13 +15812,12 @@ export class AgentSession {
 		if (options?.signal?.aborted) return;
 		const suppliedScope = options?.providerSessionScope;
 		if (suppliedScope && this.#temporaryProviderSessionScopes.at(-1)?.token !== suppliedScope) return;
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		const previousEditMode = this.#resolveActiveEditMode();
-		const expectedSessionId = this.sessionId;
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.credentialSessionId);
 		if (options?.signal?.aborted) return;
-		if (this.sessionId !== expectedSessionId) {
-			throw new Error("Session changed while selecting model");
-		}
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		if (!apiKey) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -15763,7 +15831,9 @@ export class AgentSession {
 			currentAutoScope !== undefined &&
 			this.#temporaryProviderSessionScopes.at(-1) === currentAutoScope;
 		if (replaceAutoScope && currentAutoScope) {
+			this.#assertSessionIdentityAdmission(identityAdmission);
 			await this.#restoreTopTemporaryProviderSessionScope();
+			this.#assertSessionIdentityAdmission(identityAdmission);
 		}
 		const scope = isTemporaryOperation
 			? (suppliedScope ??
@@ -15773,6 +15843,7 @@ export class AgentSession {
 			: undefined;
 		const ownsScope = scope !== undefined && !suppliedScope;
 		try {
+			this.#assertSessionIdentityAdmission(identityAdmission);
 			if (isTemporaryOperation) {
 				this.#setAgentModelWithReasoningContext(model);
 				this.#syncAppendOnlyContext(model);
@@ -15793,6 +15864,7 @@ export class AgentSession {
 			this.setThinkingLevel(thinkingLevel ?? model.thinking?.defaultLevel ?? this.thinkingLevel);
 			if (options?.persistAsSessionDefault === true) this.#clearActiveModelProfileForConcreteDefault(options?.cause);
 			await this.#syncEditToolModeAfterModelChange(previousEditMode);
+			this.#assertSessionIdentityAdmission(identityAdmission);
 		} catch (error) {
 			if (ownsScope) await this.restoreTemporaryProviderSessionScope(scope);
 			throw error;
@@ -15918,13 +15990,19 @@ export class AgentSession {
 		expectedSessionId: string = this.sessionId,
 		thinkingLevel?: ThinkingLevel,
 	): Promise<boolean> {
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		try {
+			this.#assertSessionIdentityAdmission(identityAdmission);
+		} catch {
+			return false;
+		}
 		if (expectedSessionId !== this.sessionId) return false;
 		try {
 			await this.setModelTemporary(model, thinkingLevel, {
 				persistAsSessionDefault: true,
 				cause: "user-selection",
 			});
-			return expectedSessionId === this.sessionId;
+			return expectedSessionId === this.sessionId && this.#sessionIdentityAdmissionMatches(identityAdmission);
 		} catch {
 			logger.warn("session: model control failed");
 			return false;
@@ -15949,11 +16027,11 @@ export class AgentSession {
 		if (this.#sessionAdmissionClosing || this.#sessionAdmissionClosed || this.#isDisposed) {
 			throw this.#sessionAdmissionBusyError();
 		}
-		this.#assertNoSessionTransitionAdmission();
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		if (thinkingLevel === ThinkingLevel.Inherit) {
 			throw new Error("Default model selection cannot inherit a thinking level");
 		}
-		const expectedSessionId = this.sessionId;
 		const priorSelectionFence = this.#selectionFenceTail;
 		const selectionFence = Promise.withResolvers<void>();
 		this.#selectionFenceGeneration += 1;
@@ -15969,13 +16047,9 @@ export class AgentSession {
 			const { effectiveLevel } = await this.#withSessionAdmission(
 				"selection",
 				async () => {
-					if (this.sessionId !== expectedSessionId) {
-						throw new Error("Session changed while selecting model");
-					}
+					this.#assertSessionIdentityAdmission(identityAdmission);
 					const apiKey = await this.#modelRegistry.getApiKey(model, this.credentialSessionId);
-					if (this.sessionId !== expectedSessionId) {
-						throw new Error("Session changed while selecting model");
-					}
+					this.#assertSessionIdentityAdmission(identityAdmission);
 					if (!apiKey) {
 						throw new Error(`No API key for ${model.provider}/${model.id}`);
 					}
@@ -15996,19 +16070,13 @@ export class AgentSession {
 				"selection",
 				async () => {
 					options?.onBeforeMutation?.();
-					if (this.sessionId !== expectedSessionId) {
-						throw new Error("Session changed while selecting model");
-					}
+					this.#assertSessionIdentityAdmission(identityAdmission);
 					await this.sessionManager.flush();
 					await this.#waitForAdmittedBaseSystemPromptRebuilds();
-					if (this.sessionId !== expectedSessionId) {
-						throw new Error("Session changed while selecting model");
-					}
+					this.#assertSessionIdentityAdmission(identityAdmission);
 					const expectedMutationRevision = this.#defaultModelSelectionMutationRevision;
 					const preparedSystemPrompt = await this.#prepareDefaultModelSelectionPrompt(model);
-					if (this.sessionId !== expectedSessionId) {
-						throw new Error("Session changed while selecting model");
-					}
+					this.#assertSessionIdentityAdmission(identityAdmission);
 					const stage = await this.sessionManager.stageDefaultModelSelection(
 						`${model.provider}/${model.id}`,
 						effectiveLevel,
@@ -16281,6 +16349,7 @@ export class AgentSession {
 	}
 
 	setThinkingLevel(level: ThinkingLevel | undefined, persist: boolean = false): void {
+		this.#assertNoSessionTransitionAdmission({ allowInternalTransitionEmission: true });
 		this.#applyThinkingLevel(level, persist, false);
 	}
 
@@ -16317,6 +16386,8 @@ export class AgentSession {
 	 * Set thinking level from a control surface. Global changes commit before affecting live state.
 	 */
 	async setThinkingLevelForControl(level: ThinkingLevel, persist: boolean): Promise<void> {
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		this.#assertNoSessionTransitionAdmission();
 		const previousThinkingLevel = this.thinkingLevel;
 		if (!persist) {
 			this.#applyThinkingLevel(
@@ -16346,6 +16417,7 @@ export class AgentSession {
 		} catch {
 			if (
 				mutationRevision === this.#thinkingLevelMutationRevision &&
+				this.#sessionIdentityAdmissionMatches(identityAdmission) &&
 				this.#reasoningControlContextGeneration === expectedContextGeneration &&
 				this.sessionManager.getSessionId() === expectedSessionId &&
 				this.model === expectedModel
@@ -16374,6 +16446,7 @@ export class AgentSession {
 			}
 			throw new Error("Unable to persist reasoning settings.");
 		}
+		this.#assertSessionIdentityAdmission(identityAdmission);
 
 		if (
 			mutationRevision === this.#thinkingLevelMutationRevision &&
@@ -16440,6 +16513,7 @@ export class AgentSession {
 	}
 
 	setThinkingVisibility(visibility: "visible" | "hidden", persist: boolean = false): void {
+		this.#assertNoSessionTransitionAdmission({ allowInternalTransitionEmission: true });
 		if (persist) this.#assertDurableSettingsWritable();
 		this.#thinkingVisibilityMutationRevision++;
 		this.#thinkingVisibilityLiveMutationRevision++;
@@ -16455,6 +16529,8 @@ export class AgentSession {
 	 * Set thinking visibility from a control surface. Global changes commit before affecting live state.
 	 */
 	async setThinkingVisibilityForControl(visibility: "visible" | "hidden", persist: boolean): Promise<void> {
+		const identityAdmission = this.#captureSessionIdentityAdmission();
+		this.#assertNoSessionTransitionAdmission();
 		if (!persist) {
 			this.setThinkingVisibility(visibility);
 			return;
@@ -16473,6 +16549,7 @@ export class AgentSession {
 		} catch {
 			if (
 				mutationRevision === this.#thinkingVisibilityMutationRevision &&
+				this.#sessionIdentityAdmissionMatches(identityAdmission) &&
 				this.#reasoningControlContextGeneration === expectedContextGeneration &&
 				this.sessionManager.getSessionId() === expectedSessionId &&
 				this.model === expectedModel
@@ -16498,6 +16575,7 @@ export class AgentSession {
 			}
 			throw new Error("Unable to persist reasoning settings.");
 		}
+		this.#assertSessionIdentityAdmission(identityAdmission);
 		if (
 			mutationRevision === this.#thinkingVisibilityMutationRevision &&
 			this.#thinkingVisibilityLiveMutationRevision === expectedLiveMutationRevision
