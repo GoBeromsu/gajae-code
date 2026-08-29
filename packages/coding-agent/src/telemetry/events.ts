@@ -322,7 +322,7 @@ async function transitionClaimCommitted(claimPath: string, token: string): Promi
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== before.dev || reopened.ino !== before.ino)
 			throw new Error("telemetry install ID claim changed");
-		const record = Buffer.from(serializeClaim(token, "committed", Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
+		const record = Buffer.from(serializeClaim(token, "committed"));
 		await writeClaimRecord(handle, record, Number(reopened.size));
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;

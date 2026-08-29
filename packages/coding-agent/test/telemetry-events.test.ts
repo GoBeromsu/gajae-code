@@ -539,11 +539,16 @@ describe("telemetry install ID", () => {
 			const publisher = getTelemetryInstallId(filePath);
 			while (!(await fs.stat(claimPath).catch(() => undefined))) await Bun.sleep(1);
 			await syncStarted;
-			await Bun.sleep(300);
+			let readerFinished = false;
+			const reader = getTelemetryInstallId(filePath).then(() => {
+				readerFinished = true;
+			});
+			await Bun.sleep(1_200);
+			expect(readerFinished).toBe(false);
 			expect(maximumRefreshes).toBeLessThanOrEqual(1);
 			expect(refreshes).toBeGreaterThan(0);
 			releaseSync();
-			await publisher;
+			await Promise.all([publisher, reader]);
 		} finally {
 			openSpy.mockRestore();
 			linkSpy.mockRestore();
