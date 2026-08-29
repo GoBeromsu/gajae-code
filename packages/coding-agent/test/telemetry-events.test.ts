@@ -610,6 +610,39 @@ describe("telemetry install ID", () => {
 		}
 	});
 
+	it("completes partial lease and commit generation writes", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		let claimOpens = 0;
+		let partialWrites = 0;
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (String(args[0]) === claimPath && args[1] === "r+" && ++claimOpens % 2 === 0) {
+				const originalWrite = handle.write.bind(handle);
+				handle.write = (async (buffer, offset, length, position) => {
+					partialWrites++;
+					return originalWrite(buffer, offset, Math.min(1, length ?? 0), position);
+				}) as typeof handle.write;
+			}
+			return handle;
+		});
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
+			expect(partialWrites).toBeGreaterThan(1);
+		} finally {
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
+
 	it("preserves large bigint claim identities without numeric rounding", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);

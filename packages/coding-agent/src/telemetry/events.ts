@@ -284,7 +284,7 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
 		const record = Buffer.from(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
-		await handle.write(record, 0, record.byteLength, Number(reopened.size));
+		await writeClaimRecord(handle, record, Number(reopened.size));
 		await handle.sync();
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
@@ -321,7 +321,7 @@ async function transitionClaimCommitted(claimPath: string, token: string): Promi
 		if (reopened.dev !== before.dev || reopened.ino !== before.ino)
 			throw new Error("telemetry install ID claim changed");
 		const record = Buffer.from(serializeClaim(token, "committed"));
-		await handle.write(record, 0, record.byteLength, Number(reopened.size));
+		await writeClaimRecord(handle, record, Number(reopened.size));
 		await handle.sync();
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
@@ -331,6 +331,15 @@ async function transitionClaimCommitted(claimPath: string, token: string): Promi
 		await handle?.close();
 	}
 	await assertClaimOwned(claimPath, token, "committed");
+}
+
+async function writeClaimRecord(handle: fs.FileHandle, record: Uint8Array, position: number): Promise<void> {
+	let offset = 0;
+	while (offset < record.byteLength) {
+		const { bytesWritten } = await handle.write(record, offset, record.byteLength - offset, position + offset);
+		if (bytesWritten <= 0) throw new Error("telemetry claim generation write made no progress");
+		offset += bytesWritten;
+	}
 }
 
 function claimLostError(): NodeJS.ErrnoException {
