@@ -213,18 +213,19 @@ describe("telemetry install ID", () => {
 		await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
 	});
 
-	it("fails closed on an expired pre-rename claim without final bytes", async () => {
+	it("recovers an expired claim without adopting a partial payload", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
 		await fs.writeFile(`${filePath}.lock`, `crashed-publisher\npublishing\n${Date.now() - 1}`, { mode: 0o600 });
 		await fs.writeFile(`${filePath}.crashed.tmp`, "", { mode: 0o600 });
 
-		await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+		const id = await getTelemetryInstallId(filePath);
+		expect(id).toMatch(UUID_PATTERN);
 		expect(await fs.readFile(`${filePath}.crashed.tmp`, "utf8")).toBe("");
 		expect((await fs.readdir(directory)).sort()).toEqual([
+			"telemetry-install-id",
 			"telemetry-install-id.crashed.tmp",
-			"telemetry-install-id.lock",
 		]);
 	});
 

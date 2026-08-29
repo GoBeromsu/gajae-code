@@ -27,7 +27,6 @@ export interface TelemetryEvent {
 	result?: "available" | "up_to_date" | "installed" | "failed" | "skipped";
 	installMethod?: "bun" | "npm" | "binary" | "migrate";
 }
-
 type EventInput = {
 	event?: unknown;
 	installId?: unknown;
@@ -334,7 +333,10 @@ function claimLostError(): NodeJS.ErrnoException {
 }
 
 function parseClaim(content: string): { token: string; state: ClaimState; expiresAt: number | undefined } {
-	for (const line of content.trimEnd().split("\n").reverse()) {
+	const lines = content.split("\n");
+	if (lines.at(-1) === "") lines.pop();
+	else lines.pop();
+	for (const line of lines.reverse()) {
 		const match = /^([^|\n]+)\|(publishing|committed)(?:\|(\d+))?$/.exec(line);
 		if (match)
 			return {
@@ -364,10 +366,6 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 				claim?.state === "publishing" && claim.expiresAt !== undefined && claim.expiresAt <= Date.now();
 			const committedStale = claim?.state === "committed" && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS;
 			if (publishingExpired || committedStale) {
-				if (publishingExpired && !(await pathExists(`${claimPath.slice(0, -5)}`))) {
-					await Bun.sleep(INSTALL_ID_CLAIM_DELAY_MS);
-					continue;
-				}
 				await reclaimStaleClaim(claimPath, stat, claim);
 				continue;
 			}
@@ -380,16 +378,6 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 		await Bun.sleep(INSTALL_ID_CLAIM_DELAY_MS);
 	}
 	throw new Error("telemetry install ID claim did not clear");
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-	try {
-		await fs.lstat(filePath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-		throw error;
-	}
 }
 
 async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, claim: ClaimIdentity): Promise<void> {
