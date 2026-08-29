@@ -141,14 +141,23 @@ describe("telemetry install ID", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
 
-		const ids = await Promise.all([
-			getTelemetryInstallId(filePath),
-			getTelemetryInstallId(filePath),
-			getTelemetryInstallId(filePath),
-		]);
-		expect(ids[0]).toBe(ids[1]);
-		expect(ids[1]).toBe(ids[2]);
+		try {
+			const ids = await Promise.all([
+				getTelemetryInstallId(filePath),
+				getTelemetryInstallId(filePath),
+				getTelemetryInstallId(filePath),
+			]);
+			expect(ids[0]).toBe(ids[1]);
+			expect(ids[1]).toBe(ids[2]);
+		} finally {
+			linkSpy.mockRestore();
+		}
 	});
 
 	it("syncs the containing directory after publishing", async () => {
@@ -245,6 +254,16 @@ describe("telemetry install ID", () => {
 			"telemetry-install-id",
 			"telemetry-install-id.crashed.tmp",
 		]);
+	});
+
+	it("recovers a crashed current-format claim within the recovery margin", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		await fs.writeFile(`${filePath}.lock`, `crashed|publishing|${Date.now() + 100}\n`, { mode: 0o600 });
+
+		expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
+		expect(await fs.stat(`${filePath}.lock`).catch(() => undefined)).toBeUndefined();
 	});
 
 	it("does not delete a replacement claim during stale recovery", async () => {
