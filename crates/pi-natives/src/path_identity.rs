@@ -1251,7 +1251,12 @@ pub fn exact_unlink_direct_async(
 	path: String,
 	identity: NativeExactFileIdentity,
 ) -> task::Promise<NativeExactUnlinkResult> {
-	task::blocking("exact_unlink_direct", (), move |_| Ok(exact_unlink_direct(path, identity)))
+	task::blocking("exact_unlink_direct", task::CancelToken::new(Some(250), None), move |cancel| {
+		cancel.heartbeat()?;
+		let result = exact_unlink_direct(path, identity);
+		cancel.heartbeat()?;
+		Ok(result)
+	})
 }
 /// Atomically replace a staged regular file only after validating the exact
 /// staged source and expected destination.
