@@ -45,7 +45,7 @@ const INSTALL_METHODS = new Set(["bun", "npm", "binary", "migrate"]);
 const FORBIDDEN_KEY = /(?:prompt|argv|path|env|secret|account|model|provider|repo|error|hostname|username|machine|ip)/i;
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INSTALL_ID_CLAIM_TIMEOUT_MS = 2_000;
-const INSTALL_ID_CLAIM_LEASE_MS = 2_000;
+const INSTALL_ID_CLAIM_LEASE_MS = 200;
 const INSTALL_ID_CLAIM_DELAY_MS = 1;
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
@@ -190,19 +190,30 @@ async function readExistingInstallId(filePath: string): Promise<string> {
 	return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
 }
 
-type ClaimIdentity = { dev: bigint; ino: bigint; mtimeMs: number; token: string; expiresAt: number | undefined };
+type ClaimState = "publishing" | "committed" | undefined;
+type ClaimIdentity = {
+	dev: bigint;
+	ino: bigint;
+	mtimeMs: number;
+	token: string;
+	state: ClaimState;
+	expiresAt: number | undefined;
+};
 
 async function readClaimIdentity(claimPath: string): Promise<ClaimIdentity | undefined> {
 	try {
 		const stat = await fs.lstat(claimPath, { bigint: true });
 		const content = await fs.readFile(claimPath, "utf8");
-		const [token, expiry] = content.split("\n", 3);
+		const [token, stateOrExpiry, expiryValue] = content.split("\n", 3);
+		const state = stateOrExpiry === "publishing" || stateOrExpiry === "committed" ? stateOrExpiry : undefined;
+		const expiry = state === undefined ? stateOrExpiry : expiryValue;
 		const expiresAt = expiry === undefined ? undefined : Number(expiry);
 		return {
 			dev: stat.dev,
 			ino: stat.ino,
 			mtimeMs: Number(stat.mtimeMs),
 			token,
+			state,
 			expiresAt: Number.isFinite(expiresAt) ? expiresAt : undefined,
 		};
 	} catch (error) {
@@ -223,11 +234,19 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 async function refreshClaimLease(claimPath: string, token: string): Promise<void> {
 	let handle: fs.FileHandle | undefined;
 	try {
+		const named = await fs.lstat(claimPath, { bigint: true });
 		handle = await fs.open(claimPath, "r+");
+		const opened = await handle.stat({ bigint: true });
+		if (named.dev !== opened.dev || named.ino !== opened.ino) return;
 		const content = await handle.readFile({ encoding: "utf8" });
-		if (content.split("\n", 1)[0] !== token) return;
+		const claim = parseClaim(content);
+		if (claim.token !== token || claim.state !== "publishing") return;
+		await handle.close();
+		handle = await fs.open(claimPath, "r+");
+		const reopened = await handle.stat({ bigint: true });
+		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
 		await handle.truncate(0);
-		await handle.writeFile(`${token}\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
+		await handle.writeFile(`${token}\npublishing\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
 		await handle.sync();
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
@@ -236,14 +255,60 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 	}
 }
 
+async function assertClaimOwned(
+	claimPath: string,
+	token: string,
+	state: Exclude<ClaimState, undefined>,
+): Promise<void> {
+	const claim = await readClaimIdentity(claimPath);
+	if (claim?.token === token && claim.state === state) return;
+	const error = new Error("telemetry install ID claim ownership was lost") as NodeJS.ErrnoException;
+	error.code = "ECLAIMLOST";
+	throw error;
+}
+
+async function transitionClaimCommitted(claimPath: string, token: string): Promise<void> {
+	const before = await fs.lstat(claimPath, { bigint: true });
+	let handle = await fs.open(claimPath, "r+");
+	try {
+		const opened = await handle.stat({ bigint: true });
+		if (opened.dev !== before.dev || opened.ino !== before.ino) throw new Error("telemetry install ID claim changed");
+		const content = await handle.readFile({ encoding: "utf8" });
+		if (parseClaim(content).token !== token || parseClaim(content).state !== "publishing")
+			throw new Error("telemetry install ID claim changed");
+		await handle.close();
+		handle = await fs.open(claimPath, "r+");
+		const reopened = await handle.stat({ bigint: true });
+		if (reopened.dev !== before.dev || reopened.ino !== before.ino)
+			throw new Error("telemetry install ID claim changed");
+		await handle.truncate(0);
+		await handle.writeFile(`${token}\ncommitted\n`, "utf8");
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	await assertClaimOwned(claimPath, token, "committed");
+}
+
+function parseClaim(content: string): { token: string; state: ClaimState } {
+	const [token, stateOrExpiry] = content.split("\n", 3);
+	return {
+		token,
+		state: stateOrExpiry === "publishing" || stateOrExpiry === "committed" ? stateOrExpiry : undefined,
+	};
+}
+
 async function waitForClaimRelease(claimPath: string): Promise<void> {
 	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
 	while (Date.now() < deadline) {
 		try {
 			const stat = await fs.stat(claimPath);
 			const claim = await readClaimIdentity(claimPath);
-			if (claim?.expiresAt !== undefined && claim.expiresAt <= Date.now()) {
-				await reclaimStaleClaim(claimPath, stat);
+			const publishingExpired =
+				claim?.state === "publishing" && claim.expiresAt !== undefined && claim.expiresAt <= Date.now();
+			const committedStale = claim?.state === "committed" && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS;
+			if (publishingExpired || committedStale) {
+				await reclaimStaleClaim(claimPath, stat, claim);
 				continue;
 			}
 		} catch (error) {
@@ -255,8 +320,9 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 	throw new Error("telemetry install ID claim did not clear");
 }
 
-async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats): Promise<void> {
+async function reclaimStaleClaim(claimPath: string, stat: BigIntStats | Stats, claim: ClaimIdentity): Promise<void> {
 	if (!stat.isFile()) return;
+	if (claim.state === "publishing") await syncDirectory(path.dirname(claimPath));
 	const content = await fs.readFile(claimPath);
 	const current = await fs.lstat(claimPath, { bigint: true });
 	if (current.dev !== BigInt(stat.dev) || current.ino !== BigInt(stat.ino)) return;
@@ -277,7 +343,7 @@ async function removeOwnedClaim(claimPath: string, token: string): Promise<void>
 	try {
 		const stat = await fs.lstat(claimPath, { bigint: true });
 		const content = await fs.readFile(claimPath, "utf8");
-		if (content.split("\n", 1)[0] !== token) return;
+		if (parseClaim(content).token !== token) return;
 		const current = await fs.lstat(claimPath, { bigint: true });
 		if (current.dev !== stat.dev || current.ino !== stat.ino) return;
 		const result = exactUnlinkDirect(claimPath, {
@@ -302,7 +368,10 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 	const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
 	const claimTemporaryPath = `${claimPath}.${randomUUID()}.tmp`;
 	let ownsClaim = false;
+	let publishedFinal = false;
+	let committed = false;
 	let leaseTimer: NodeJS.Timeout | undefined;
+	let heartbeat = Promise.resolve();
 	let claim: fs.FileHandle;
 	try {
 		try {
@@ -316,7 +385,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			throw error;
 		}
 		try {
-			await claim.writeFile(`${token}\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
+			await claim.writeFile(`${token}\npublishing\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
 			await claim.sync();
 		} finally {
 			await claim.close();
@@ -334,9 +403,9 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		if (!ownsClaim) throw new Error("telemetry install ID claim changed");
 		leaseTimer = setInterval(
 			() => {
-				void refreshClaimLease(claimPath, token);
+				heartbeat = heartbeat.then(() => refreshClaimLease(claimPath, token));
 			},
-			Math.max(1, Math.floor(INSTALL_ID_CLAIM_LEASE_MS / 3)),
+			Math.max(1, Math.floor(INSTALL_ID_CLAIM_LEASE_MS / 100)),
 		);
 		try {
 			return await readPublishedInstallId(filePath);
@@ -356,19 +425,26 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		} finally {
 			await handle.close();
 		}
+		await assertClaimOwned(claimPath, token, "publishing");
 		const publication = await renameNoReplacePathAsync(temporaryPath, filePath);
 		if (!publication.ok) {
 			if (publication.code !== "destination_exists")
 				throw new Error(`telemetry install ID publication failed: ${publication.reason}`);
 			return await readPublishedInstallId(filePath);
 		}
+		publishedFinal = true;
+		await assertClaimOwned(claimPath, token, "publishing");
 		await syncDirectory(path.dirname(filePath));
+		if (leaseTimer !== undefined) clearInterval(leaseTimer);
+		await heartbeat;
+		await transitionClaimCommitted(claimPath, token);
+		committed = true;
 		return installId;
 	} finally {
 		if (leaseTimer !== undefined) clearInterval(leaseTimer);
 		await fs.rm(claimTemporaryPath, { force: true }).catch(() => undefined);
 		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
-		if (ownsClaim) await removeOwnedClaim(claimPath, token).catch(() => undefined);
+		if (ownsClaim && (!publishedFinal || committed)) await removeOwnedClaim(claimPath, token).catch(() => undefined);
 	}
 }
 

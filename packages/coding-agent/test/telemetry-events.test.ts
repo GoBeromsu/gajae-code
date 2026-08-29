@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getTelemetryInstallId, serializeTelemetryEvent } from "../src/telemetry/events";
 
 const tempDirs: string[] = [];
+const realOpen = fs.open;
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
@@ -135,7 +136,7 @@ describe("telemetry install ID", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
-		const originalOpen = fs.open.bind(fs);
+		const originalOpen = realOpen;
 		const openedPaths: string[] = [];
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			openedPaths.push(String(args[0]));
@@ -215,7 +216,7 @@ describe("telemetry install ID", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
-		await fs.writeFile(`${filePath}.lock`, `crashed-publisher\n${Date.now() - 1}`, { mode: 0o600 });
+		await fs.writeFile(`${filePath}.lock`, `crashed-publisher\npublishing\n${Date.now() - 1}`, { mode: 0o600 });
 		await fs.writeFile(`${filePath}.crashed.tmp`, "", { mode: 0o600 });
 
 		const id = await getTelemetryInstallId(filePath);
@@ -232,7 +233,7 @@ describe("telemetry install ID", () => {
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
 		const claimPath = `${filePath}.lock`;
-		await fs.writeFile(claimPath, `expired\n${Date.now() - 1}`, { mode: 0o600 });
+		await fs.writeFile(claimPath, `expired\npublishing\n${Date.now() - 1}`, { mode: 0o600 });
 		const originalReadFile = fs.readFile.bind(fs);
 		let replaced = false;
 		const readSpy = spyOn(fs, "readFile").mockImplementation(async (file, options) => {
@@ -257,7 +258,7 @@ describe("telemetry install ID", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
-		const originalOpen = fs.open.bind(fs);
+		const originalOpen = realOpen;
 		const originalPlatform = process.platform;
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			if (String(args[0]) === directory) {
@@ -286,7 +287,7 @@ describe("telemetry install ID", () => {
 			error.code = "EPERM";
 			throw error;
 		});
-		const originalOpen = fs.open.bind(fs);
+		const originalOpen = realOpen;
 		let releaseSync!: () => void;
 		const syncPaused = new Promise<void>(resolve => {
 			releaseSync = resolve;
@@ -312,6 +313,8 @@ describe("telemetry install ID", () => {
 			});
 			await Bun.sleep(10);
 			expect(readerFinished).toBe(false);
+			await Bun.sleep(500);
+			expect(readerFinished).toBe(false);
 			releaseSync();
 			await Promise.all([publisher, reader]);
 			expect(await fs.readFile(filePath, "utf8")).toMatch(/\n$/);
@@ -319,6 +322,56 @@ describe("telemetry install ID", () => {
 			openSpy.mockRestore();
 			linkSpy.mockRestore();
 		}
+	});
+
+	it("recovers a crash after rename only after establishing directory durability", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, `crashed\npublishing\n${Date.now() - 1}`, { mode: 0o600 });
+
+		expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
+	});
+
+	it("fails closed when ownership is replaced before commit", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		const replacement = (async () => {
+			while (!(await fs.stat(filePath).catch(() => undefined))) await Bun.sleep(1);
+			await fs.rm(claimPath);
+			await fs.writeFile(claimPath, "replacement-claim", { mode: 0o600 });
+		})();
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow(/claim changed|ownership was lost|ENOENT/);
+			await replacement;
+			expect(await fs.readFile(claimPath, "utf8")).toBe("replacement-claim");
+		} finally {
+			linkSpy.mockRestore();
+		}
+	});
+
+	it("cleans a stale committed claim without re-publishing the UUID", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		await fs.writeFile(claimPath, "committed\ncommitted\n", { mode: 0o600 });
+		await fs.utimes(claimPath, new Date(Date.now() - 3_000), new Date(Date.now() - 3_000));
+
+		expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
 	});
 });
 
