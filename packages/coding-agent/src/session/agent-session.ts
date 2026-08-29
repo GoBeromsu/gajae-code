@@ -4179,22 +4179,22 @@ export class AgentSession {
 				if (dropped.length > 0) this.#settleDeliveredOwnedRegistrations(dropped);
 				const first = survivors[0];
 				if (!first) return;
-				await this.#awaitStartupTurnBarrier();
-				if (this.#isDisposed) return;
-				// A user prompt may have started during the barrier/scheduling
-				// delay: if the session is now streaming, mutating the epoch and
-				// lineage here would corrupt the ACTIVE user turn (and
-				// agent.prompt would then reject as busy, losing the drained
-				// completion). Route the survivors through followUp — the
-				// streaming injector's path — which allocates the fresh resume
-				// lineage at actual admission (review thread P1).
-				if (this.isStreaming) {
-					for (const message of survivors) this.agent.followUp(message);
-					return;
-				}
-				if (survivors.some(message => ownedCompletionResumeAction(message) === "fresh"))
-					this.#resumeFromOwnedCompletion();
 				try {
+					await this.#awaitStartupTurnBarrier();
+					if (this.#isDisposed) return;
+					// A user prompt may have started during the barrier/scheduling
+					// delay: if the session is now streaming, mutating the epoch and
+					// lineage here would corrupt the ACTIVE user turn (and
+					// agent.prompt would then reject as busy, losing the drained
+					// completion). Route the survivors through followUp — the
+					// streaming injector's path — which allocates the fresh resume
+					// lineage at actual admission (review thread P1).
+					if (this.isStreaming) {
+						for (const message of survivors) this.agent.followUp(message);
+						return;
+					}
+					if (survivors.some(message => ownedCompletionResumeAction(message) === "fresh"))
+						this.#resumeFromOwnedCompletion();
 					if (survivors.length === 1) {
 						await this.agent.prompt(first, {
 							...this.#managedFallbackPromptOptions(),
