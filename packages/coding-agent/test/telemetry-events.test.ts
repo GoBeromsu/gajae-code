@@ -643,6 +643,37 @@ describe("telemetry install ID", () => {
 		}
 	});
 
+	it("fails closed when a lease refresh sync fails", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		let claimOpens = 0;
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (String(args[0]) === claimPath && args[1] === "r+" && ++claimOpens % 2 === 0) {
+				handle.sync = async () => {
+					const error = new Error("claim sync failed") as NodeJS.ErrnoException;
+					error.code = "EIO";
+					throw error;
+				};
+			}
+			return handle;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim sync failed");
+		} finally {
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
+
 	it("preserves large bigint claim identities without numeric rounding", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);

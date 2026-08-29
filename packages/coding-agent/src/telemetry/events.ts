@@ -283,11 +283,13 @@ async function refreshClaimLease(claimPath: string, token: string): Promise<void
 		handle = await fs.open(claimPath, "r+");
 		const reopened = await handle.stat({ bigint: true });
 		if (reopened.dev !== named.dev || reopened.ino !== named.ino) return;
-		const record = Buffer.from(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS));
+		const record = Buffer.from(serializeClaim(token, "publishing"));
 		await writeClaimRecord(handle, record, Number(reopened.size));
 		await handle.sync();
+		await fs.utimes(claimPath, new Date(), new Date());
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
 	} finally {
 		await handle?.close().catch(() => undefined);
 	}
@@ -379,7 +381,9 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 			const stat = await fs.stat(claimPath, { bigint: true });
 			const claim = await readClaimIdentity(claimPath);
 			const publishingExpired =
-				claim?.state === "publishing" && claim.expiresAt !== undefined && claim.expiresAt <= Date.now();
+				claim?.state === "publishing" &&
+				((claim.expiresAt !== undefined && claim.expiresAt <= Date.now()) ||
+					(claim.expiresAt === undefined && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS));
 			const committedStale = claim?.state === "committed" && Date.now() - claim.mtimeMs > INSTALL_ID_CLAIM_LEASE_MS;
 			if (publishingExpired || committedStale) {
 				await reclaimStaleClaim(claimPath, stat, claim);
@@ -467,6 +471,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 	let committed = false;
 	let leaseTimer: NodeJS.Timeout | undefined;
 	let heartbeat = Promise.resolve();
+	let heartbeatFailure: unknown;
 	let heartbeatStopped = false;
 	let claim: fs.FileHandle;
 	try {
@@ -502,7 +507,11 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			leaseTimer = setTimeout(
 				() => {
 					leaseTimer = undefined;
-					heartbeat = refreshClaimLease(claimPath, token).finally(scheduleHeartbeat);
+					heartbeat = refreshClaimLease(claimPath, token)
+						.catch(error => {
+							heartbeatFailure = error;
+						})
+						.finally(scheduleHeartbeat);
 				},
 				Math.max(1, Math.floor(INSTALL_ID_CLAIM_LEASE_MS / 100)),
 			);
@@ -530,6 +539,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		heartbeatStopped = true;
 		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
 		await heartbeat;
+		if (heartbeatFailure !== undefined) throw heartbeatFailure;
 		await refreshClaimLease(claimPath, token);
 		heartbeatStopped = false;
 		scheduleHeartbeat();
@@ -546,6 +556,7 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		heartbeatStopped = true;
 		if (leaseTimer !== undefined) clearTimeout(leaseTimer);
 		await heartbeat;
+		if (heartbeatFailure !== undefined) throw heartbeatFailure;
 		await transitionClaimCommitted(claimPath, token);
 		committed = true;
 		return installId;
