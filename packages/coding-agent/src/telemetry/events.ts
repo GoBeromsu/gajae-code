@@ -48,7 +48,7 @@ const INSTALL_ID_CLAIM_RECOVERY_MARGIN_MS = 500;
 const INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS = INSTALL_ID_CLAIM_TIMEOUT_MS + INSTALL_ID_CLAIM_RECOVERY_MARGIN_MS;
 const INSTALL_ID_CLAIM_LEASE_MS = 1_000;
 const INSTALL_ID_CLAIM_POLL_INITIAL_MS = 25;
-const durableInstallIdPaths = new Map<string, Promise<void>>();
+const durableInstallIdPaths = new Map<string, { identity: string; promise: Promise<void> }>();
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
 	if (value === null || typeof value !== "object") return false;
@@ -255,15 +255,20 @@ function claimRaceError(): NodeJS.ErrnoException {
 }
 
 async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: string): Promise<string> {
-	let durability = durableInstallIdPaths.get(filePath);
-	if (durability === undefined) {
-		durability = syncDirectory(path.dirname(filePath));
-		durableInstallIdPaths.set(filePath, durability);
-		durability.catch(() => durableInstallIdPaths.delete(filePath));
-	}
-	await durability;
 	const deadline = performance.now() + INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS;
 	while (true) {
+		const identity = await fs.lstat(filePath, { bigint: true });
+		const identityKey = `${identity.dev}:${identity.ino}:${identity.size}:${identity.mtimeNs}`;
+		let durability = durableInstallIdPaths.get(filePath);
+		if (durability === undefined || durability.identity !== identityKey) {
+			const promise = syncDirectory(path.dirname(filePath));
+			durability = { identity: identityKey, promise };
+			durableInstallIdPaths.set(filePath, durability);
+			promise.catch(() => {
+				if (durableInstallIdPaths.get(filePath)?.promise === promise) durableInstallIdPaths.delete(filePath);
+			});
+		}
+		await durability.promise;
 		const value = await readPublishedInstallId(filePath);
 		try {
 			if (await readClaimIdentity(claimPath)) {

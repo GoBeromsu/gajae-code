@@ -582,7 +582,7 @@ describe("telemetry install ID", () => {
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			if (String(args[0]) === directory) {
 				directoryOpens++;
-				if (directoryOpens === 1) return realOpen(...args);
+				if (directoryOpens <= 2) return realOpen(...args);
 				const error = new Error("steady-state directory sync must not run") as NodeJS.ErrnoException;
 				error.code = "EIO";
 				throw error;
@@ -593,7 +593,10 @@ describe("telemetry install ID", () => {
 		try {
 			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
 			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
-			expect(directoryOpens).toBe(1);
+			await fs.rm(filePath);
+			await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174001\n", { mode: 0o600 });
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174001");
+			expect(directoryOpens).toBe(2);
 		} finally {
 			openSpy.mockRestore();
 		}
