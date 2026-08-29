@@ -3246,7 +3246,7 @@ export class AgentSession {
 			);
 		}
 		this.#sessionTransitionKind = kind;
-		this.#sessionTransitionDropsAsync = kind !== "compact" && kind !== "switch-session";
+		this.#sessionTransitionDropsAsync = false;
 		this.#coordinatorPersistGeneration += 1;
 	}
 
@@ -5593,6 +5593,7 @@ export class AgentSession {
 	}
 
 	#quarantineQueuedAsyncResults(): void {
+		this.#sessionTransitionDropsAsync = true;
 		this.#suppressOwnAsyncJobDeliveries();
 		this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainKindMessages("async-result", true));
 		this.yieldQueue.clearKind("async-result");
@@ -12754,8 +12755,11 @@ export class AgentSession {
 		// thread P1).
 		const manager = this.#ownedAsyncJobManager ?? AsyncJobManager.instance();
 		for (const message of messages) {
-			const details = (message as { details?: { ownedCompletions?: OwnedCompletionEnvelope[] } }).details;
-			for (const envelope of details?.ownedCompletions ?? []) {
+			const details = (message as { details?: { ownedCompletions?: unknown } }).details;
+			if (!Array.isArray(details?.ownedCompletions)) continue;
+			for (const candidate of details.ownedCompletions) {
+				if (!isOwnedCompletionEnvelope(candidate)) continue;
+				const envelope = candidate as OwnedCompletionEnvelope;
 				const job = manager?.getJob(envelope.registration.jobId);
 				const status = job?.generation === envelope.registration.jobGeneration ? job?.status : undefined;
 				// Evicted jobs have no live record (job === undefined); terminal
@@ -14787,6 +14791,7 @@ export class AgentSession {
 			this.#disconnectFromAgent();
 			await this.abort();
 			this.#cancelOwnAsyncJobs();
+			this.#sessionTransitionDropsAsync = true;
 			this.#suppressOwnAsyncJobDeliveries();
 			const queuedMessages = this.yieldQueue.drainMessages(true);
 			this.#settleDeliveredOwnedRegistrations(queuedMessages);
@@ -14943,6 +14948,7 @@ export class AgentSession {
 			this.#syncAgentSessionId();
 			this.#bindWorkflowGateEmitter(previousWorkflowGateSessionId);
 			this.#rekeyHindsightMemoryForCurrentSessionId();
+			this.#resetHindsightConversationTrackingIfHindsight();
 
 			this.#resetIrcRosterDeliveryState();
 
