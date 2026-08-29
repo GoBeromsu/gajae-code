@@ -1385,6 +1385,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let agent: Agent;
 	let session!: AgentSession;
 	let sessionManager!: SessionManager;
+	let extensionRunner: ExtensionRunner | undefined;
 	let hasSession = false;
 	let processCwdClaimed = false;
 	// Keep SDK-owned manager references aligned when AgentSession adopts a cold
@@ -1395,6 +1396,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			processCwdClaimed = SessionManager.transferProcessCwdOwnership(previous, next);
 		}
 		sessionManager = next;
+		extensionRunner?.rebindSessionManager(next);
 	};
 	let hasRegistered = false;
 	let registeredAgentRef: AgentRef | undefined;
@@ -3647,7 +3649,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		const customCommandsResult: CustomCommandsLoadResult = { commands: [], errors: [] };
 
-		let extensionRunner: ExtensionRunner | undefined;
 		if (extensionsResult.extensions.length > 0) {
 			extensionRunner = new ExtensionRunner(
 				extensionsResult.extensions,
@@ -4204,21 +4205,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (!obfuscator?.hasSecrets() || !obfuscateMessagesFn) return converted;
 			return obfuscateMessagesFn(obfuscator, converted);
 		};
+		const activeExtensionRunner = extensionRunner;
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal, scope?: AttemptScopeRef) => {
 			// External Agent events dispatch listeners without awaiting them. The
 			// session-owned barrier makes any pre-admission artifact transformation
 			// visible before this provider context is normalized.
 			await session?.awaitPendingContextTransformations();
-			return extensionRunner ? await extensionRunner.emitContext(messages, scope) : messages;
+			return activeExtensionRunner ? await activeExtensionRunner.emitContext(messages, scope) : messages;
 		};
-		const onPayload = extensionRunner
+		const onPayload = activeExtensionRunner
 			? async (payload: unknown, _model?: Model, scope?: AttemptScopeRef) => {
-					return await extensionRunner.emitBeforeProviderRequest(payload, scope);
+					return await activeExtensionRunner.emitBeforeProviderRequest(payload, scope);
 				}
 			: undefined;
-		const onResponse: SimpleStreamOptions["onResponse"] | undefined = extensionRunner
+		const onResponse: SimpleStreamOptions["onResponse"] | undefined = activeExtensionRunner
 			? async (response, model, scope) => {
-					await extensionRunner.emitAfterProviderResponse(response, model, scope);
+					await activeExtensionRunner.emitAfterProviderResponse(response, model, scope);
 				}
 			: undefined;
 
