@@ -270,6 +270,9 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 		}
 		await durability.promise;
 		const value = await readPublishedInstallId(filePath);
+		const after = await fs.lstat(filePath, { bigint: true });
+		const afterKey = `${after.dev}:${after.ino}:${after.size}:${after.mtimeNs}`;
+		if (afterKey !== identityKey) continue;
 		try {
 			if (await readClaimIdentity(claimPath)) {
 				await waitForClaimRelease(claimPath);
