@@ -575,9 +575,33 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 			await claim.close();
 		}
 		let claimPublication = await renameNoReplacePathAsync(claimTemporaryPath, claimPath);
+		let directClaimAcquired = false;
 		if (claimPublication.reason === "atomic_unavailable" || claimPublication.reason === "invalid_request")
 			claimPublication = await linkNoReplacePathAsync(claimTemporaryPath, claimPath);
-		if (!claimPublication.ok) {
+		if (claimPublication.reason === "atomic_unavailable" || claimPublication.reason === "invalid_request") {
+			try {
+				const directClaim = await fs.open(claimPath, "wx", 0o600);
+				try {
+					await writeClaimRecord(
+						directClaim,
+						Buffer.from(serializeClaim(token, "publishing", Date.now() + INSTALL_ID_CLAIM_LEASE_MS)),
+						0,
+					);
+					await directClaim.sync();
+				} finally {
+					await directClaim.close();
+				}
+				directClaimAcquired = true;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+					const busy = new Error("telemetry install ID claim is busy") as NodeJS.ErrnoException;
+					busy.code = "ECLAIM";
+					throw busy;
+				}
+				throw error;
+			}
+		}
+		if (!claimPublication.ok && !directClaimAcquired) {
 			if (claimPublication.code === "destination_exists" || claimPublication.reason === "destination_exists") {
 				const busy = new Error("telemetry install ID claim is busy") as NodeJS.ErrnoException;
 				busy.code = "ECLAIM";
