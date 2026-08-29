@@ -538,6 +538,31 @@ describe("telemetry install ID", () => {
 		}
 	});
 
+	it("does not repeat the directory barrier for steady-state reads", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		await fs.writeFile(filePath, "123e4567-e89b-42d3-a456-426614174000\n", { mode: 0o600 });
+		let directoryOpens = 0;
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			if (String(args[0]) === directory) {
+				directoryOpens++;
+				const error = new Error("steady-state directory sync must not run") as NodeJS.ErrnoException;
+				error.code = "EIO";
+				throw error;
+			}
+			return realOpen(...args);
+		});
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+			expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
+			expect(directoryOpens).toBe(0);
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
 	it("keeps slow claim refreshes single-flight and does not retain exit", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);

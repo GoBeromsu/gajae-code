@@ -254,7 +254,6 @@ function claimRaceError(): NodeJS.ErrnoException {
 async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: string): Promise<string> {
 	const deadline = Date.now() + INSTALL_ID_CLAIM_TIMEOUT_MS;
 	while (true) {
-		await syncDirectory(path.dirname(filePath));
 		const value = await readPublishedInstallId(filePath);
 		try {
 			if (await readClaimIdentity(claimPath)) {
