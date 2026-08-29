@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { exactUnlinkDirectAsync, renameNoReplacePathAsync } from "@gajae-code/natives";
+import { exactUnlinkDirectAsync, linkNoReplacePathAsync, renameNoReplacePathAsync } from "@gajae-code/natives";
 import { getTrustedAgentFile } from "@gajae-code/utils";
 
 export const TELEMETRY_SCHEMA_VERSION = 1 as const;
@@ -200,11 +200,11 @@ async function readExistingInstallIdSnapshot(filePath: string): Promise<string> 
 	const claimBefore = await readClaimIdentity(claimPath);
 	let fileMissing = false;
 	try {
-		const existing = (await Bun.file(filePath).text()).trim();
+		const existing = await readPublishedInstallId(filePath);
 		const claimAfter = await readClaimIdentity(claimPath);
-		if (UUID_V4.test(existing) && claimBefore === undefined && claimAfter === undefined)
+		if (claimBefore === undefined && claimAfter === undefined)
 			return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
-		if (UUID_V4.test(existing) && claimBefore !== undefined && claimAfter === undefined)
+		if (claimBefore !== undefined && claimAfter === undefined)
 			return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -574,7 +574,9 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		} finally {
 			await claim.close();
 		}
-		const claimPublication = await renameNoReplacePathAsync(claimTemporaryPath, claimPath);
+		let claimPublication = await renameNoReplacePathAsync(claimTemporaryPath, claimPath);
+		if (claimPublication.reason === "atomic_unavailable" || claimPublication.reason === "invalid_request")
+			claimPublication = await linkNoReplacePathAsync(claimTemporaryPath, claimPath);
 		if (!claimPublication.ok) {
 			if (claimPublication.code === "destination_exists" || claimPublication.reason === "destination_exists") {
 				const busy = new Error("telemetry install ID claim is busy") as NodeJS.ErrnoException;
