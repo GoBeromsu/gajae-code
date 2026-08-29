@@ -48,6 +48,8 @@ const INSTALL_ID_CLAIM_RECOVERY_MARGIN_MS = 500;
 const INSTALL_ID_CLAIM_WAIT_TIMEOUT_MS = INSTALL_ID_CLAIM_TIMEOUT_MS + INSTALL_ID_CLAIM_RECOVERY_MARGIN_MS;
 const INSTALL_ID_CLAIM_LEASE_MS = 1_000;
 const INSTALL_ID_CLAIM_POLL_INITIAL_MS = 25;
+const INSTALL_ID_MAX_SERIALIZED_BYTES = 128;
+const INSTALL_ID_PARTIAL_GRACE_MS = 250;
 const durableInstallIdPaths = new Map<string, { identity: string; promise: Promise<void> }>();
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
@@ -166,6 +168,8 @@ function isUnsupportedDirectorySync(error: unknown): boolean {
 }
 
 async function readPublishedInstallId(filePath: string): Promise<string> {
+	const stat = await fs.lstat(filePath, { bigint: true });
+	if (stat.size > BigInt(INSTALL_ID_MAX_SERIALIZED_BYTES)) throw new Error("telemetry install ID is malformed");
 	const existing = (await Bun.file(filePath).text()).trim();
 	if (!UUID_V4.test(existing)) throw new Error("telemetry install ID is malformed");
 	return existing;
@@ -178,6 +182,8 @@ async function readExistingInstallId(filePath: string): Promise<string> {
 			return await readExistingInstallIdSnapshot(filePath);
 		} catch (error) {
 			if (error instanceof Error && error.message === "telemetry install ID is malformed") {
+				const stat = await fs.lstat(filePath, { bigint: true });
+				if (Date.now() - Number(stat.mtimeMs) > INSTALL_ID_PARTIAL_GRACE_MS) throw error;
 				if (performance.now() >= deadline) throw error;
 				await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
 				continue;
@@ -279,6 +285,8 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 			value = await readPublishedInstallId(filePath);
 		} catch (error) {
 			if (!(error instanceof Error) || error.message !== "telemetry install ID is malformed") throw error;
+			if (Date.now() - Number((await fs.lstat(filePath, { bigint: true })).mtimeMs) > INSTALL_ID_PARTIAL_GRACE_MS)
+				throw error;
 			if (performance.now() >= deadline) throw error;
 			await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
 			continue;

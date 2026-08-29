@@ -92,7 +92,9 @@ describe("telemetry install ID", () => {
 		const filePath = path.join(directory, "telemetry-install-id");
 		await fs.writeFile(filePath, "derived-from-hostname\n", { mode: 0o600 });
 
+		const started = performance.now();
 		await expect(getTelemetryInstallId(filePath)).rejects.toThrow("malformed");
+		expect(performance.now() - started).toBeLessThan(500);
 	});
 
 	it("publishes only complete payloads despite a delayed competing publisher", async () => {
