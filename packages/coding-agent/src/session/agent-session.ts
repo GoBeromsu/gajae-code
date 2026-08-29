@@ -14747,8 +14747,9 @@ export class AgentSession {
 			this.#disconnectFromAgent();
 			await this.abort();
 			this.#cancelOwnAsyncJobs();
+			const queuedMessages = this.yieldQueue.drainMessages(true);
 			this.#suppressOwnAsyncJobDeliveries();
-			this.#settleDeliveredOwnedRegistrations(this.yieldQueue.drainMessages());
+			this.#settleDeliveredOwnedRegistrations(queuedMessages);
 			this.yieldQueue.clear();
 			this.#pendingBackgroundExchanges = [];
 			this.#closeAllProviderSessions("context clear");

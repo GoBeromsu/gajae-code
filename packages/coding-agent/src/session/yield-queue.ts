@@ -106,12 +106,12 @@ export class YieldQueue {
 		}
 	}
 
-	drainMessages(): AgentMessage[] {
+	drainMessages(includeStale = false): AgentMessage[] {
 		const messages: AgentMessage[] = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
-			messages.push(...(this.#build(kind, dispatcher, entries) ?? []));
+			messages.push(...(this.#build(kind, dispatcher, entries, includeStale) ?? []));
 		}
 		return messages;
 	}
@@ -163,7 +163,7 @@ export class YieldQueue {
 		return entries;
 	}
 
-	#build(kind: string, dispatcher: StoredDispatcher, entries: unknown[]): AgentMessage[] | null {
+	#build(kind: string, dispatcher: StoredDispatcher, entries: unknown[], includeStale = false): AgentMessage[] | null {
 		// Corrected turn semantics (terminal abort): turn-scope abort blocks only
 		// deliveries whose origin is a continuation of the aborted turn.
 		// Owned-completion deliveries from work deliberately left running are
@@ -175,7 +175,7 @@ export class YieldQueue {
 		// blocked-continuation/owned-cleanup entries.
 		const survivors: unknown[] = [];
 		for (const entry of entries) {
-			if (dispatcher.isStale) {
+			if (!includeStale && dispatcher.isStale) {
 				let stale: boolean;
 				try {
 					stale = dispatcher.isStale(entry);
