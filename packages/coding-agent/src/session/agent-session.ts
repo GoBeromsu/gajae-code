@@ -4183,7 +4183,7 @@ export class AgentSession {
 				if (!first) return;
 				try {
 					await this.#awaitStartupTurnBarrier();
-					if (this.#isDisposed) return;
+					if (this.#isDisposed || this.#sessionTransitionKind !== undefined) return;
 					// A user prompt may have started during the barrier/scheduling
 					// delay: if the session is now streaming, mutating the epoch and
 					// lineage here would corrupt the ACTIVE user turn (and
