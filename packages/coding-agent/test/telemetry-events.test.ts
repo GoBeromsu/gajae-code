@@ -10,6 +10,7 @@ const realOpen = fs.open;
 const realLstat = fs.lstat;
 const realStat = fs.stat.bind(fs);
 const realBunFile = Bun.file;
+const realBunSleep = Bun.sleep;
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
@@ -508,6 +509,33 @@ describe("telemetry install ID", () => {
 
 		expect(await getTelemetryInstallId(filePath)).toBe("123e4567-e89b-42d3-a456-426614174000");
 		expect(await fs.stat(claimPath).catch(() => undefined)).toBeUndefined();
+	});
+
+	it("uses bounded claim polls and promptly observes release", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(claimPath, "waiter", { mode: 0o600 });
+		let pollCount = 0;
+		const sleepSpy = spyOn(Bun, "sleep").mockImplementation(async milliseconds => {
+			pollCount++;
+			return realBunSleep(milliseconds);
+		});
+		const started = performance.now();
+		const release = setTimeout(() => {
+			void fs.rm(claimPath);
+		}, 60);
+		release.unref();
+
+		try {
+			expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
+			expect(performance.now() - started).toBeLessThan(500);
+			expect(pollCount).toBeLessThan(10);
+		} finally {
+			clearTimeout(release);
+			sleepSpy.mockRestore();
+		}
 	});
 
 	it("keeps slow claim refreshes single-flight and does not retain exit", async () => {

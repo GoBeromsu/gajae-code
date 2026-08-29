@@ -45,7 +45,7 @@ const FORBIDDEN_KEY = /(?:prompt|argv|path|env|secret|account|model|provider|rep
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const INSTALL_ID_CLAIM_TIMEOUT_MS = 2_000;
 const INSTALL_ID_CLAIM_LEASE_MS = 1_000;
-const INSTALL_ID_CLAIM_DELAY_MS = 1;
+const INSTALL_ID_CLAIM_POLL_INITIAL_MS = 25;
 
 function hasForbiddenKey(value: unknown, seen = new Set<object>()): boolean {
 	if (value === null || typeof value !== "object") return false;
@@ -176,7 +176,7 @@ async function readExistingInstallId(filePath: string): Promise<string> {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ECLAIMRACE") throw error;
 			if (Date.now() >= deadline) throw new Error("telemetry install ID claim did not clear");
-			await Bun.sleep(INSTALL_ID_CLAIM_DELAY_MS);
+			await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
 		}
 	}
 }
@@ -407,7 +407,7 @@ async function waitForClaimRelease(claimPath: string): Promise<void> {
 			if (code === "ECLAIMRACE") continue;
 			throw error;
 		}
-		await Bun.sleep(INSTALL_ID_CLAIM_DELAY_MS);
+		await Bun.sleep(INSTALL_ID_CLAIM_POLL_INITIAL_MS);
 	}
 	throw new Error("telemetry install ID claim did not clear");
 }
