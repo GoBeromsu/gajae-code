@@ -131,6 +131,25 @@ describe("telemetry install ID", () => {
 		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
 	});
 
+	it("syncs the containing directory after publishing", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const originalOpen = fs.open.bind(fs);
+		const openedPaths: string[] = [];
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			openedPaths.push(String(args[0]));
+			return originalOpen(...args);
+		});
+
+		try {
+			await getTelemetryInstallId(filePath);
+			expect(openedPaths).toContain(directory);
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
 	it("does not adopt stale temporary payloads and cleans its own temporary file", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
@@ -144,7 +163,7 @@ describe("telemetry install ID", () => {
 		expect((await fs.readdir(directory)).sort()).toEqual(["telemetry-install-id", "telemetry-install-id.stale.tmp"]);
 	});
 
-	it("fails closed when the profile filesystem rejects exclusive publication", async () => {
+	it("converges through a claim when the profile filesystem rejects hard links", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
@@ -155,8 +174,30 @@ describe("telemetry install ID", () => {
 		});
 
 		try {
-			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("hard links are unavailable");
-			expect(await fs.readdir(directory)).toEqual([]);
+			const ids = await Promise.all([getTelemetryInstallId(filePath), getTelemetryInstallId(filePath)]);
+			expect(ids[0]).toBe(ids[1]);
+			expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
+			expect(await fs.readdir(directory)).toEqual(["telemetry-install-id"]);
+		} finally {
+			linkSpy.mockRestore();
+		}
+	});
+
+	it("fails closed on a stale claim without removing the hostile claim", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		await fs.writeFile(claimPath, "hostile-claim", { mode: 0o600 });
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim did not clear");
+			expect(await fs.readFile(claimPath, "utf8")).toBe("hostile-claim");
 		} finally {
 			linkSpy.mockRestore();
 		}
