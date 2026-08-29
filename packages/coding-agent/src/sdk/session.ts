@@ -1413,6 +1413,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let credentialScopeId: string | undefined;
 	let credentialScopeLeased = false;
 	let closeOwnedSettings: () => Promise<void> = async () => {};
+	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
+	let credentialDisabledTarget: ExtensionRunner | undefined;
 	const closeOwnedAuthStorage = async (): Promise<void> => {
 		if (ownsModelRegistry) await modelRegistry.dispose();
 		if (!hasSession && credentialScopeLeased && credentialScopeId) {
@@ -1435,8 +1437,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// credential_disabled event past us. An embedder's constructor handler makes the
 		// listener set non-empty from construction, which defeats AuthStorage's no-listener
 		// buffer — so we can't rely on it to catch startup events for the extension runner.
-		const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
-		let credentialDisabledTarget: ExtensionRunner | undefined;
 		unsubscribeCredentialDisabled = authStorage.onCredentialDisabled(event => {
 			if (credentialDisabledTarget) {
 				// Discard return: any handler error is routed through runner.onError listeners.
@@ -1448,10 +1448,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const applyCredentialSelector = (scopeId: string, provider: string, selector: AuthCredentialSelector): void => {
 			authStorage.setSessionCredentialSelector(scopeId, provider, selector, authStorageOwner);
 		};
-		const ownsScopedSettings = options.settings === undefined;
-		let settings = options.settings ?? (await logger.time("settings", Settings.loadForScope, { cwd, agentDir }));
 		if (ownsModelRegistry) modelRegistry.setScopedSettings(settings);
-		const initialOwnedSettings = ownsScopedSettings ? settings : undefined;
 		const autoroutingInactive =
 			settings.get("task.autorouting.enabled") === true && !settings.getEffectiveAutorouting().active;
 		closeOwnedSettings = async (): Promise<void> => {
