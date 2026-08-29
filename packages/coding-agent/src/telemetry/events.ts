@@ -144,14 +144,14 @@ async function syncDirectory(directory: string): Promise<void> {
 	try {
 		handle = await fs.open(directory, "r");
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+		if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") return;
 		throw error;
 	}
 	try {
 		try {
 			await handle.sync();
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+			if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
 		}
 	} finally {
 		await handle.close();
@@ -170,8 +170,10 @@ async function readExistingInstallId(filePath: string): Promise<string> {
 	let fileMissing = false;
 	try {
 		const existing = (await Bun.file(filePath).text()).trim();
-		if (UUID_V4.test(existing) && claimBefore === undefined && !(await claimChangedOrPresent(claimPath, claimBefore)))
-			return existing;
+		const claimAfter = await readClaimIdentity(claimPath);
+		if (UUID_V4.test(existing) && claimBefore === undefined && claimAfter === undefined) return existing;
+		if (UUID_V4.test(existing) && claimBefore !== undefined && claimAfter === undefined)
+			return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		fileMissing = true;
@@ -209,12 +211,6 @@ async function readClaimIdentity(claimPath: string): Promise<ClaimIdentity | und
 	}
 }
 
-async function claimChangedOrPresent(claimPath: string, before: ClaimIdentity | undefined): Promise<boolean> {
-	const after = await readClaimIdentity(claimPath);
-	if (!before) return after !== undefined;
-	return after === undefined || after.dev !== before.dev || after.ino !== before.ino || after.token !== before.token;
-}
-
 async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: string): Promise<string> {
 	const value = await readPublishedInstallId(filePath);
 	if (await readClaimIdentity(claimPath)) {
@@ -222,6 +218,22 @@ async function readPublishedInstallIdWhenUnclaimed(filePath: string, claimPath: 
 		return readPublishedInstallIdWhenUnclaimed(filePath, claimPath);
 	}
 	return value;
+}
+
+async function refreshClaimLease(claimPath: string, token: string): Promise<void> {
+	let handle: fs.FileHandle | undefined;
+	try {
+		handle = await fs.open(claimPath, "r+");
+		const content = await handle.readFile({ encoding: "utf8" });
+		if (content.split("\n", 1)[0] !== token) return;
+		await handle.truncate(0);
+		await handle.writeFile(`${token}\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
+		await handle.sync();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return;
+	} finally {
+		await handle?.close().catch(() => undefined);
+	}
 }
 
 async function waitForClaimRelease(claimPath: string): Promise<void> {
@@ -288,11 +300,13 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 	const claimPath = `${filePath}.lock`;
 	const token = randomUUID();
 	const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+	const claimTemporaryPath = `${claimPath}.${randomUUID()}.tmp`;
 	let ownsClaim = false;
+	let leaseTimer: NodeJS.Timeout | undefined;
 	let claim: fs.FileHandle;
 	try {
 		try {
-			claim = await fs.open(claimPath, "wx", 0o600);
+			claim = await fs.open(claimTemporaryPath, "wx", 0o600);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EEXIST") {
 				const busy = new Error("telemetry install ID claim is busy") as NodeJS.ErrnoException;
@@ -304,11 +318,26 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		try {
 			await claim.writeFile(`${token}\n${Date.now() + INSTALL_ID_CLAIM_LEASE_MS}`, "utf8");
 			await claim.sync();
-			ownsClaim = (await Bun.file(claimPath).text()).split("\n", 1)[0] === token;
 		} finally {
 			await claim.close();
 		}
+		const claimPublication = await renameNoReplacePathAsync(claimTemporaryPath, claimPath);
+		if (!claimPublication.ok) {
+			if (claimPublication.code === "destination_exists" || claimPublication.reason === "destination_exists") {
+				const busy = new Error("telemetry install ID claim is busy") as NodeJS.ErrnoException;
+				busy.code = "ECLAIM";
+				throw busy;
+			}
+			throw new Error(`telemetry install ID claim publication failed: ${claimPublication.reason}`);
+		}
+		ownsClaim = (await Bun.file(claimPath).text()).split("\n", 1)[0] === token;
 		if (!ownsClaim) throw new Error("telemetry install ID claim changed");
+		leaseTimer = setInterval(
+			() => {
+				void refreshClaimLease(claimPath, token);
+			},
+			Math.max(1, Math.floor(INSTALL_ID_CLAIM_LEASE_MS / 3)),
+		);
 		try {
 			return await readPublishedInstallId(filePath);
 		} catch (error) {
@@ -336,6 +365,8 @@ async function publishWithClaim(filePath: string, installId: string): Promise<st
 		await syncDirectory(path.dirname(filePath));
 		return installId;
 	} finally {
+		if (leaseTimer !== undefined) clearInterval(leaseTimer);
+		await fs.rm(claimTemporaryPath, { force: true }).catch(() => undefined);
 		await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
 		if (ownsClaim) await removeOwnedClaim(claimPath, token).catch(() => undefined);
 	}

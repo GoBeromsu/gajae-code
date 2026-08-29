@@ -258,6 +258,7 @@ describe("telemetry install ID", () => {
 		tempDirs.push(directory);
 		const filePath = path.join(directory, "telemetry-install-id");
 		const originalOpen = fs.open.bind(fs);
+		const originalPlatform = process.platform;
 		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
 			if (String(args[0]) === directory) {
 				const error = new Error("directory handles are unsupported") as NodeJS.ErrnoException;
@@ -268,8 +269,10 @@ describe("telemetry install ID", () => {
 		});
 
 		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 			expect(await getTelemetryInstallId(filePath)).toMatch(UUID_PATTERN);
 		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 			openSpy.mockRestore();
 		}
 	});
