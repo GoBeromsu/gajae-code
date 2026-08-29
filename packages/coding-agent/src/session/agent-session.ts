@@ -4185,9 +4185,15 @@ export class AgentSession {
 				if (dropped.length > 0) this.#settleDeliveredOwnedRegistrations(dropped);
 				const first = survivors[0];
 				if (!first) return;
+				const admissionGeneration = this.#coordinatorPersistGeneration;
 				try {
 					await this.#awaitStartupTurnBarrier();
-					if (this.#isDisposed || this.#sessionTransitionKind !== undefined) return;
+					if (
+						this.#isDisposed ||
+						this.#sessionTransitionKind !== undefined ||
+						this.#coordinatorPersistGeneration !== admissionGeneration
+					)
+						return;
 					// A user prompt may have started during the barrier/scheduling
 					// delay: if the session is now streaming, mutating the epoch and
 					// lineage here would corrupt the ACTIVE user turn (and
@@ -5402,6 +5408,10 @@ export class AgentSession {
 	}
 	get isDisposed(): boolean {
 		return this.#isDisposed;
+	}
+
+	get isSessionTransitioning(): boolean {
+		return this.#sessionTransitionKind !== undefined;
 	}
 
 	registerToolSessionCleanup(cleanup: () => Promise<void> | void): () => void {
