@@ -148,6 +148,19 @@ describe("telemetry install ID", () => {
 			error.code = "EPERM";
 			throw error;
 		});
+		let claimCreated = false;
+		let failOwnerPublication = true;
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const target = String(args[0]);
+			if (target.startsWith(`${filePath}.lock.`) && args[1] === "wx") claimCreated = true;
+			if (claimCreated && failOwnerPublication && target.startsWith(`${filePath}.`) && !target.includes(".lock.")) {
+				failOwnerPublication = false;
+				const error = new Error("first portable owner failed") as NodeJS.ErrnoException;
+				error.code = "ECLAIM";
+				throw error;
+			}
+			return realOpen(...args);
+		});
 
 		try {
 			const ids = await Promise.all([
@@ -158,6 +171,7 @@ describe("telemetry install ID", () => {
 			expect(ids[0]).toBe(ids[1]);
 			expect(ids[1]).toBe(ids[2]);
 		} finally {
+			openSpy.mockRestore();
 			linkSpy.mockRestore();
 		}
 	});
@@ -813,6 +827,42 @@ describe("telemetry install ID", () => {
 
 		try {
 			await expect(getTelemetryInstallId(filePath)).rejects.toThrow("claim sync failed");
+		} finally {
+			openSpy.mockRestore();
+			linkSpy.mockRestore();
+		}
+	});
+
+	it("does not timestamp a replacement claim path during refresh", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-telemetry-test-"));
+		tempDirs.push(directory);
+		const filePath = path.join(directory, "telemetry-install-id");
+		const claimPath = `${filePath}.lock`;
+		const linkSpy = spyOn(fs, "link").mockImplementation(async () => {
+			const error = new Error("hard links are unavailable") as NodeJS.ErrnoException;
+			error.code = "EPERM";
+			throw error;
+		});
+		const openSpy = spyOn(fs, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (String(args[0]) === claimPath && args[1] === "r+") {
+				const originalUtimes = handle.utimes.bind(handle);
+				let substituted = false;
+				handle.utimes = async (atime, mtime) => {
+					if (!substituted) {
+						substituted = true;
+						await fs.rm(claimPath, { force: true });
+						await fs.writeFile(claimPath, "replacement", { mode: 0o600 });
+					}
+					return originalUtimes(atime, mtime);
+				};
+			}
+			return handle;
+		});
+
+		try {
+			await expect(getTelemetryInstallId(filePath)).rejects.toThrow();
+			expect(await fs.readFile(claimPath, "utf8")).toBe("replacement");
 		} finally {
 			openSpy.mockRestore();
 			linkSpy.mockRestore();
