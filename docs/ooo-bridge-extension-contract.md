@@ -58,7 +58,7 @@ Before command dispatch, the exact-prefix helper increments the Ouroboros bridge
 
 ### Runtime status
 
-Session startup quarantines filesystem extension modules. `createAgentSession` seeds its extension set from `options.preloadedExtensions` and falls back to an empty set, so discovered `extensions/**` paths are ignored even when `options.additionalExtensionPaths` is supplied (`packages/coding-agent/src/sdk/session.ts`). `discoverAndLoadExtensions` remains reachable from `gjc --list-models`; no session entrypoint calls it.
+Session startup quarantines filesystem extension modules. `createAgentSession` seeds its extension set from `options.preloadedExtensions` and falls back to an empty set, so discovered `extensions/**` paths are ignored even when `options.additionalExtensionPaths` is supplied (`packages/coding-agent/src/sdk/session.ts`). `discoverAndLoadExtensions` has no production caller: its only remaining call site is `packages/coding-agent/src/cli/list-models.ts`, and `gjc --list-models` calls that entry point with `disableExtensionDiscovery: true`, bypassing discovery. No session entrypoint calls it.
 
 A bridge installed under the locations below is therefore present and inspectable, and its `input` handler never runs. `gjc customize doctor` reports the state directly:
 
