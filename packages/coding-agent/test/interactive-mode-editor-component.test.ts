@@ -547,6 +547,29 @@ describe("InteractiveMode.setEditorComponent", () => {
 		}
 	});
 
+	it("keeps the welcome model pills in sync with live model switches", async () => {
+		settings.set("startup.quiet", false);
+		settings.set("startup.skipLogoAnimation", true);
+		vi.spyOn(mode.ui, "start").mockImplementation(() => {});
+		await mode.init();
+		const welcome = mode.ui.children.find(child => child instanceof WelcomeComponent);
+		if (!(welcome instanceof WelcomeComponent)) throw new Error("Expected welcome component");
+		const initial = session.model;
+		const next = session.modelRegistry.find("openai", "gpt-4o");
+		if (!initial || !next) throw new Error("Expected registry models");
+		const renderWelcome = () => welcome.render(160).map(stripRenderControls).join("\n");
+		expect(renderWelcome()).toContain(initial.name);
+
+		session.agent.setModel(next);
+		expect(session.model).toBe(next);
+		mode.updateEditorChrome();
+
+		const rendered = renderWelcome();
+		expect(rendered).toContain(next.name);
+		expect(rendered).toContain(next.provider);
+		expect(rendered).not.toContain(initial.name);
+	});
+
 	it("still renders no welcome surface at all under startup.quiet regardless of the motion flag", async () => {
 		settings.set("startup.quiet", true);
 		settings.set("startup.skipLogoAnimation", false);
